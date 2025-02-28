@@ -13,15 +13,15 @@ import uuid
 from errors import InsertIntoException, LoadingException, InvalidRowError, EncodingError
 from traceback import format_exception
 import pickle
-import re
+import os
 
 class Database:
     def __init__(self):
         self.insert = False
-        self.filename = 'vectors.pickle'
+        self.filename = os.getcwd()+'/vectors.pickle'
         self.delimiter = '|@|'
         self.internal_delimiter = '||'
-        self.bow_filename = 'bow.pickle'
+        self.bow_filename = os.getcwd()+'/bow.pickle'
         self.current_idx = self.get_current_idx()
 
     def insert_into(self, data):

@@ -1,15 +1,15 @@
 import nltk
 from nltk.corpus import stopwords
-import pickle
-
+from database import Database
 try:
     stopwords.words('english')
 except LookupError:
     nltk.download('stopwords')
 
 stop_words = set(stopwords.words('english'))
-with open('bow.pickle', 'rb') as file:
-    bow = pickle.load(file)
+
+db = Database()
+bow = db.load_bow()
 
 encoded_stop_words = [bow[word] for word in stop_words if word in bow]
 

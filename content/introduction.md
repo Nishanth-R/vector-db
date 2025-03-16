@@ -1,3 +1,10 @@
+Title: Building a Vector Database: My Journey from Scratch 🚀
+Date: 2025-03-16
+Category: General
+Tags: database, develop, journey
+Slug: scratch
+Author: Nishanth Ravindran
+---
 # Building a Vector Database: My Journey from Scratch 🚀
 
 ## From Application Developer to Database Builder

@@ -1,6 +1,6 @@
 AUTHOR = 'Nishanth'
 SITENAME = "Nishanth's blogs"
-SITEURL = "https://nishanth-r.github.io/vector-db"
+SITEURL = "/"
 THEME = 'pelican-twitchy'
 PATH = "content"
 
@@ -29,4 +29,4 @@ SOCIAL = (
 DEFAULT_PAGINATION = 10
 
 # Uncomment following line if you want document-relative URLs when developing
-# RELATIVE_URLS = True
+RELATIVE_URLS = True

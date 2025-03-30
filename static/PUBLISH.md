@@ -17,5 +17,5 @@ Open [http://127.0.0.1:8000](http://127.0.0.1:8000) to view site contents locall
 
 ## Generate content
 ```bash
-pelican content -s pelicanconf.py
+pelican content -s pelicanconf.py -o serve
 ```

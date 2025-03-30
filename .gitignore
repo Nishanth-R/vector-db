@@ -175,5 +175,7 @@ cython_debug/
 dist/*
 *.pickle
 
-pelican-env/
-output/**
+static/pelican-env/**
+static/output/**
+static/serve/**
+static/__pycache__/**

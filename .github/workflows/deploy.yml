@@ -23,10 +23,10 @@ jobs:
           pip install pelican markdown beautifulsoup4
 
       - name: Generate site
-        run: pelican content -s publishconf.py -o docs
+        run: pelican content -s publishconf.py -o serve
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v3
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./docs
+          publish_dir: ./serve

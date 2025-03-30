@@ -174,3 +174,8 @@ cython_debug/
 .pypirc
 dist/*
 *.pickle
+
+static/pelican-env/**
+static/output/**
+static/serve/**
+static/__pycache__/**

@@ -1,6 +1,6 @@
 AUTHOR = 'Nishanth'
 SITENAME = "Nishanth's blogs"
-SITEURL = "/"
+SITEURL = "https://nishanth-r.github.io/vector-db/"
 THEME = 'pelican-twitchy'
 PATH = "content"
 

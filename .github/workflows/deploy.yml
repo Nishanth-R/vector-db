@@ -5,6 +5,10 @@ on:
     branches:
       - main
 
+permissions:
+  contents: write # We generate static HTML, JS, CSS so we need write access to the repo
+  pages: write
+
 jobs:
   deploy:
     runs-on: ubuntu-latest

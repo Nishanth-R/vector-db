@@ -7,147 +7,368 @@ Database - Implementation of a simple database that will load data to and from d
 Assumptions -
     id - is the only primary key
 """
-import traceback
 import uuid
+import threading
+from concurrent.futures import ThreadPoolExecutor
+import os
+import json
+import pickle
+from typing import Dict, List, Any, Optional
 
 from errors import InsertIntoException, LoadingException, InvalidRowError, EncodingError
-from traceback import format_exception
-import pickle
-import os
+
+class Table:
+    def __init__(self, table_name: str, columns: List[str], primary_key: str = 'id'):
+        """
+        Initializes a new table object.
+
+        Args:
+            table_name (str): The name of the table.
+            columns (list): A list of column names for the table.
+            primary_key (str, optional): The name of the primary key column. Defaults to 'id'.
+        """
+        self.table_name = table_name
+        self.columns = columns
+        self.primary_key = primary_key
+        if primary_key not in columns:
+            self.columns.insert(0, primary_key)
+        self.data = []
+        self._next_id = 1 if primary_key == 'id' else None
+        self._lock = threading.Lock()
+
+    def insert_row(self, row_values: Dict[str, Any]) -> None:
+        """
+        Inserts a new row into the table.
+
+        Args:
+            row_values (dict): A dictionary where keys are column names and values are the row data.
+
+        Raises:
+            ValueError: If the provided keys do not match the table columns (excluding primary key if auto-generated).
+            InvalidRowError: If the row ID already exists.
+        """
+        with self._lock:
+            try:
+                if self.primary_key == 'id':
+                    if self.primary_key not in row_values:
+                        row_values[self.primary_key] = self._next_id
+                        self._next_id += 1
+                    elif row_values[self.primary_key] >= self._next_id:
+                        self._next_id = row_values[self.primary_key] + 1
+
+                # Check for duplicate IDs
+                if self.primary_key in row_values:
+                    existing_ids = {row[0] for row in self.data}
+                    if row_values[self.primary_key] in existing_ids:
+                        raise InvalidRowError(f"ID {row_values[self.primary_key]} already exists in table '{self.table_name}'")
+
+                if set(row_values.keys()) != set(self.columns):
+                    raise ValueError(f"Provided keys {set(row_values.keys())} do not match table columns {set(self.columns)}.")
+
+                ordered_values = tuple(row_values[col] for col in self.columns)
+                self.data.append(ordered_values)
+            except Exception as err:
+                raise InsertIntoException(f"Failed to insert row into table '{self.table_name}': {str(err)}")
+
+    def get_rows(self) -> List[Dict[str, Any]]:
+        """
+        Returns all rows in the table as a list of dictionaries.
+
+        Raises:
+            LoadingException: If there's an error retrieving the rows.
+        """
+        try:
+            return [dict(zip(self.columns, row)) for row in self.data]
+        except Exception as err:
+            raise LoadingException(f"Failed to get rows from table '{self.table_name}': {str(err)}")
+
+    def save_to_disk(self, filename: str) -> None:
+        """
+        Saves the table data to a JSON file.
+
+        Args:
+            filename (str): The name of the file to save to.
+
+        Raises:
+            LoadingException: If there's an error saving to disk.
+        """
+        try:
+            table_data = {
+                "table_name": self.table_name,
+                "columns": self.columns,
+                "primary_key": self.primary_key,
+                "data": [dict(zip(self.columns, row)) for row in self.data]
+            }
+            with open(filename, 'w') as jsonfile:
+                json.dump(table_data, jsonfile, indent=4)
+            print(f"Table '{self.table_name}' saved to '{filename}'")
+        except Exception as err:
+            raise LoadingException(f"Failed to save table '{self.table_name}' to disk: {str(err)}")
+
+    @classmethod
+    def load_from_disk(cls, filename: str) -> 'Table':
+        """
+        Loads a table from a JSON file.
+
+        Args:
+            filename (str): The name of the file to load from.
+
+        Returns:
+            Table: A new Table object loaded from the file.
+
+        Raises:
+            LoadingException: If there's an error loading from disk.
+        """
+        try:
+            with open(filename, 'r') as jsonfile:
+                table_data = json.load(jsonfile)
+                table_name = table_data['table_name']
+                columns = table_data['columns']
+                primary_key = table_data['primary_key']
+                new_table = cls(table_name, columns, primary_key)
+                for row_dict in table_data['data']:
+                    new_table.insert_row(row_dict)
+                return new_table
+        except Exception as err:
+            raise LoadingException(f"Failed to load table from '{filename}': {str(err)}")
+
 
 class Database:
-    def __init__(self):
-        self.insert = False
-        self.filename = os.getcwd()+'/vectors.pickle'
-        self.delimiter = '|@|'
-        self.internal_delimiter = '||'
-        self.bow_filename = os.getcwd()+'/bow.pickle'
-        self.current_idx = self.get_current_idx()
+    def __init__(self, db_dir: str = None):
+        """
+        Initialize the database with a directory for storing files.
+        
+        Args:
+            db_dir (str, optional): Directory to store database files. Defaults to current directory.
 
-    def insert_into(self, data):
+        Raises:
+            LoadingException: If there's an error initializing the database.
+        """
         try:
-            loaded_list = self.query_all_document()
-            loaded_list.append(data)
-            with open(self.filename, "wb+") as file:
-                pickle.dump(loaded_list, file)
+            self.db_dir = db_dir or os.getcwd()
+            self.tables: Dict[str, Table] = {}
+            self.bow_filename = os.path.join(self.db_dir, 'bow.pickle')
+            self._bow_cache = None
+            self._bow_lock = threading.Lock()
+            self._executor = ThreadPoolExecutor(max_workers=4)
+            self._load_tables()
         except Exception as err:
-            print(err.__str__())
-            raise InsertIntoException('Exception occurred while executing "INSERT INTO" ' +
-                                      format_exception(err))
+            raise LoadingException(f"Failed to initialize database: {str(err)}")
 
-    def query_all_document(self):
+    def _load_tables(self) -> None:
+        """
+        Load all tables from disk.
+
+        Raises:
+            LoadingException: If there's an error loading tables.
+        """
         try:
-            with open(self.filename, 'rb') as file:
-                response = pickle.load(file)
-            return response
-        except EOFError:
-            with open(self.filename, 'wb') as file:
-                pickle.dump([], file)
-                return []
+            for filename in os.listdir(self.db_dir):
+                if filename.endswith('.json'):
+                    table_name = filename[:-5]  # Remove .json extension
+                    table_path = os.path.join(self.db_dir, filename)
+                    self.tables[table_name] = Table.load_from_disk(table_path)
         except Exception as err:
-            print(err.__str__())
-            raise LoadingException('Exception occurred while executing SELECT *  statement '
-                                   + format_exception(err))
+            raise LoadingException(f"Failed to load tables from directory '{self.db_dir}': {str(err)}")
 
-    def query_by_id(self, idx):
+    def create_table(self, table_name: str, columns: List[str], primary_key: str = 'id') -> Table:
+        """
+        Create a new table in the database.
+        
+        Args:
+            table_name (str): Name of the table
+            columns (List[str]): List of column names
+            primary_key (str, optional): Primary key column name. Defaults to 'id'.
+            
+        Returns:
+            Table: The created table object
+
+        Raises:
+            InvalidRowError: If the table already exists.
+            InsertIntoException: If there's an error creating the table.
+        """
         try:
-            all_documents = self.query_all_document()
-            for document in all_documents.split(self.delimiter):
-                for subdoc in document.split(self.internal_delimiter):
-                    if subdoc[0] == idx:
-                        return document
+            if table_name in self.tables:
+                raise InvalidRowError(f"Table '{table_name}' already exists")
+            
+            table = Table(table_name, columns, primary_key)
+            self.tables[table_name] = table
+            return table
+        except InvalidRowError:
+            raise
         except Exception as err:
-            print(err.__str__())
-            raise LoadingException('Exception occurred while executing "SELECT by id" statement '
-                                   + format_exception(exc = err))
+            raise InsertIntoException(f"Failed to create table '{table_name}': {str(err)}")
 
-    def validate_row(self,data):
-        all_documents = self.query_all_document()
-        all_ids = []
-        for document in all_documents.split(self.delimiter):
-            for subdoc in document.split(self.internal_delimiter):
-                all_ids.append(subdoc[0])
-        row = data.split(self.internal_delimiter)
-        if row[0] in all_ids:
-            raise InvalidRowError('ID '+str(row[0])+' is already in use.')
+    def get_table(self, table_name: str) -> Optional[Table]:
+        """
+        Get a table by name.
+        
+        Args:
+            table_name (str): Name of the table to retrieve
+            
+        Returns:
+            Optional[Table]: The table if it exists, None otherwise
+
+        Raises:
+            LoadingException: If there's an error retrieving the table.
+        """
+        try:
+            return self.tables.get(table_name)
+        except Exception as err:
+            raise LoadingException(f"Failed to get table '{table_name}': {str(err)}")
+
+    def _get_bow(self) -> Dict[str, int]:
+        """
+        Get the bag of words dictionary, loading from disk if necessary.
+
+        Raises:
+            LoadingException: If there's an error loading the BOW dictionary.
+        """
+        with self._bow_lock:
+            try:
+                if self._bow_cache is None:
+                    try:
+                        with open(self.bow_filename, 'rb') as file:
+                            self._bow_cache = pickle.load(file)
+                    except (EOFError, FileNotFoundError):
+                        self._bow_cache = {}
+                        with open(self.bow_filename, 'wb') as file:
+                            pickle.dump(self._bow_cache, file)
+                return self._bow_cache
+            except Exception as err:
+                raise LoadingException(f"Failed to load BOW dictionary: {str(err)}")
+
+    def _save_bow(self) -> None:
+        """
+        Save the bag of words dictionary to disk.
+
+        Raises:
+            LoadingException: If there's an error saving the BOW dictionary.
+        """
+        with self._bow_lock:
+            try:
+                if self._bow_cache is not None:
+                    with open(self.bow_filename, 'wb') as file:
+                        pickle.dump(self._bow_cache, file)
+            except Exception as err:
+                raise LoadingException(f"Failed to save BOW dictionary: {str(err)}")
 
     @staticmethod
-    def tokenise_row(text):
-        if text:
-            return text.split(' ')
-        return None
+    def tokenize_text(text: str) -> List[str]:
+        """Tokenize text into words."""
+        if not text:
+            return []
+        return text.lower().split()
 
-    def load_bow(self):
+    def encode_text(self, text: str) -> List[int]:
+        """
+        Encode text into a list of word IDs using the bag of words dictionary.
+        
+        Args:
+            text (str): Text to encode
+            
+        Returns:
+            List[int]: List of word IDs
+
+        Raises:
+            EncodingError: If there's an error encoding the text.
+        """
         try:
-            with open(self.bow_filename, 'rb') as file:
-                return pickle.load(file=file)
-        except EOFError:
-            with open(self.bow_filename, 'wb') as file:
-                pickle.dump({}, file)
-                return {}
-
-    def dump_bow(self, bow):
-        with open(self.bow_filename, 'wb') as file:
-            pickle.dump(bow, file)
-
-    @staticmethod
-    def get_word_id(word, bow):
-        try:
-            return bow[word]
-        except KeyError:
-            return None
-
-    def encode_text(self, text):
-        try:
-            if isinstance(text,str):
-                words = self.tokenise_row(text)
-            elif isinstance(text, list):
-                words = text
-            else:
-                raise ValueError('Invalid datatype sent for encoding.')
+            words = self.tokenize_text(text)
             if not words:
-                raise ValueError('No text available to encode.')
+                return []
+
+            bow = self._get_bow()
             tokens = []
-            bow = self.load_bow()
-            bow_change_flag = False
+            bow_changed = False
 
             for word in words:
-                word_id = self.get_word_id(word.lower(), bow)
-                if word_id:
-                    tokens.append(word_id)
-                else:
-                    new_word_id = len(bow) + 1
-                    tokens.append(new_word_id)
-                    bow.update({word.lower().strip():new_word_id})
-                    bow_change_flag = True
+                word = word.strip()
+                if not word:
+                    continue
+                    
+                word_id = bow.get(word)
+                if word_id is None:
+                    word_id = len(bow) + 1
+                    bow[word] = word_id
+                    bow_changed = True
+                tokens.append(word_id)
 
-            #Wow, an optimisation
-            if bow_change_flag:
-                self.dump_bow(bow)
+            if bow_changed:
+                self._save_bow()
 
             return tokens
 
         except Exception as err:
-            print(err.__str__())
-            raise EncodingError('Error during encoding process '+
-                                traceback.format_exception(err))
+            raise EncodingError(f"Error during encoding process: {str(err)}")
 
-    def get_current_idx(self):
-        return len(self.query_all_document()) + 1
+    def _encode_text_fields(self, table_name: str, row_values: Dict[str, Any]) -> None:
+        """
+        Encode text fields in a row and add encoded_data column.
+        
+        Args:
+            table_name (str): Name of the table
+            row_values (Dict[str, Any]): Row values to encode
 
-    def interface_insert(self,text):
-        encoded_text = self.encode_text(text)
-        encoded_text = ' '.join(str(_) for _ in encoded_text)
-        current_idx = self.get_current_idx()
-        insert_data = (str(current_idx)+ self.internal_delimiter + str(uuid.uuid4())
-                       + self.internal_delimiter + encoded_text)
-        self.insert_into(insert_data)
+        Raises:
+            EncodingError: If there's an error encoding the text fields.
+        """
+        try:
+            table = self.tables[table_name]
+            text_fields = [col for col in table.columns if col != 'id' and col != 'encoded_data']
+            
+            # Combine all text fields
+            combined_text = ' '.join(str(row_values.get(field, '')) for field in text_fields)
+            
+            # Encode the combined text
+            encoded_data = self.encode_text(combined_text)
+            row_values['encoded_data'] = encoded_data
+        except Exception as err:
+            raise EncodingError(f"Failed to encode text fields for table '{table_name}': {str(err)}")
 
-    def convert_vector_to_text(self,vector):
-        bow = self.load_bow()
-        reverse_bow = {value: key for key, value in bow.items()}
-        if isinstance(vector,list): #Extend in the future
-            appender = []
-            for word in vector:
-                appender.append(reverse_bow[word])
-            return ' '.join(word for word in appender)
+    def insert_into(self, table_name: str, row_values: Dict[str, Any]) -> None:
+        """
+        Insert a row into a table and encode text fields in parallel.
+        
+        Args:
+            table_name (str): Name of the table to insert into
+            row_values (Dict[str, Any]): Row values to insert
+
+        Raises:
+            InsertIntoException: If there's an error inserting the row.
+            InvalidRowError: If the row is invalid.
+            LoadingException: If there's an error saving to disk.
+        """
+        try:
+            if table_name not in self.tables:
+                raise InvalidRowError(f"Table '{table_name}' does not exist")
+
+            future = self._executor.submit(self._encode_text_fields, table_name, row_values)
+            future.result()
+            
+            self.tables[table_name].insert_row(row_values)
+            self.tables[table_name].save_to_disk(os.path.join(self.db_dir, f"{table_name}.json"))
+        except (InvalidRowError, InsertIntoException, LoadingException):
+            raise
+        except Exception as err:
+            raise InsertIntoException(f"Failed to insert row into table '{table_name}': {str(err)}")
+
+    def convert_vector_to_text(self, vector: List[int]) -> str:
+        """
+        Convert a vector of word IDs back to text.
+        
+        Args:
+            vector (List[int]): Vector of word IDs
+            
+        Returns:
+            str: Decoded text
+
+        Raises:
+            LoadingException: If there's an error loading the BOW dictionary.
+        """
+        try:
+            bow = self._get_bow()
+            reverse_bow = {value: key for key, value in bow.items()}
+            return ' '.join(reverse_bow.get(word_id, '') for word_id in vector)
+        except Exception as err:
+            raise LoadingException(f"Failed to convert vector to text: {str(err)}")

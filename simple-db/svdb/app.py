@@ -1,23 +1,24 @@
-import asyncio
-import aiohttp
-from typing import List, Dict, Any, Optional, Tuple
-import numpy as np
-from sklearn.metrics.pairwise import cosine_similarity
-from bs4 import BeautifulSoup
+from __future__ import annotations
+from typing import List, Dict, Any, Optional, TYPE_CHECKING
+
+if TYPE_CHECKING:
+    import numpy as np
+
 from concurrent.futures import ThreadPoolExecutor
 import ssl
 import socket
-from aiohttp_socks import ProxyConnector
-import httpx
-from rich.console import Console
-from rich.progress import Progress, SpinnerColumn, TextColumn
 import time
+from .errors import FetchFailure, InsertIntoException, LoadingException, InvalidRowError, EncodingError
 
-from database import Database
-from errors import FetchFailure, InsertIntoException, LoadingException, InvalidRowError, EncodingError
-from helper import filter_stopwords_in_text
+console = None
 
-console = Console()
+def get_console():
+    """Lazily get or create console."""
+    global console
+    if console is None:
+        from rich.console import Console  # type: ignore[import-untyped]
+        console = Console()
+    return console
 
 class AppFlow:
     def __init__(self, db_dir: str = None):
@@ -31,9 +32,11 @@ class AppFlow:
             LoadingException: If there's an error initializing the database.
         """
         try:
+            from .database import Database
             self.database = Database(db_dir)
             self._executor = ThreadPoolExecutor(max_workers=4)
             self._session = None
+            import aiohttp  # type: ignore[import-untyped]
             self._timeout = aiohttp.ClientTimeout(total=30)  # 30 seconds timeout
             self._ssl_context = ssl.create_default_context()
             self._ssl_context.check_hostname = False
@@ -45,6 +48,8 @@ class AppFlow:
     async def _init_session(self):
         """Initialize aiohttp session if not already initialized."""
         if self._session is None:
+            # Lazy import aiohttp - only needed when fetching URLs
+            import aiohttp  # type: ignore[import-untyped]
             # Configure connector with optimized settings for Windows
             connector = aiohttp.TCPConnector(
                 ssl=self._ssl_context,
@@ -66,6 +71,8 @@ class AppFlow:
     async def _close_session(self):
         """Close aiohttp session if it exists."""
         if self._session:
+            # Import here in case session was never initialized
+            import aiohttp  # type: ignore[import-untyped]
             await self._session.close()
             self._session = None
 
@@ -82,12 +89,16 @@ class AppFlow:
         Raises:
             FetchFailure: If there's an error fetching the URL.
         """
+        # Lazy imports for URL fetching
+        from bs4 import BeautifulSoup  # type: ignore[import-untyped]
+        from rich.progress import Progress, SpinnerColumn, TextColumn  # type: ignore[import-untyped]
+        
         await self._init_session()
         try:
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
-                console=console
+                console=get_console()
             ) as progress:
                 task = progress.add_task(f"Fetching content from {url}...", total=None)
                 
@@ -120,57 +131,87 @@ class AppFlow:
                     
                     raise FetchFailure(f"Could not find article elements on the page: {url}")
                     
-        except aiohttp.ClientError as e:
-            raise FetchFailure(f"Network error fetching URL {url}: {str(e)}")
         except Exception as e:
+            # Check if it's an aiohttp error
+            try:
+                import aiohttp  # type: ignore[import-untyped]
+                if isinstance(e, aiohttp.ClientError):
+                    raise FetchFailure(f"Network error fetching URL {url}: {str(e)}")
+            except ImportError:
+                pass
             raise FetchFailure(f"Error fetching URL {url}: {str(e)}")
 
-    @staticmethod
-    def _pad_arrays(vector1: np.ndarray, vector2: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    async def _find_closest_using_umap_hdbscan(
+        self, 
+        query_embedding: "np.ndarray", 
+        all_embeddings: "np.ndarray",
+        all_articles: List[Dict[str, Any]],
+        num_results: int = 1
+    ) -> List[Dict[str, Any]]:
         """
-        Pad arrays to the same length for similarity calculation.
+        Find closest vectors using UMAP for dimensionality reduction and HDBSCAN for clustering.
         
         Args:
-            vector1 (np.ndarray): First vector
-            vector2 (np.ndarray): Second vector
+            query_embedding (np.ndarray): Query embedding vector
+            all_embeddings (np.ndarray): All article embeddings
+            all_articles (List[Dict[str, Any]]): All article data
+            num_results (int): Number of results to return
             
         Returns:
-            Tuple[np.ndarray, np.ndarray]: Padded vectors
-        """
-        len1 = vector1.shape[1]
-        len2 = vector2.shape[1]
-        if len1 < len2:
-            padding = np.zeros((1, len2 - len1))
-            vector1 = np.concatenate([vector1, padding], axis=1)
-        elif len2 < len1:
-            padding = np.zeros((1, len1 - len2))
-            vector2 = np.concatenate([vector2, padding], axis=1)
-        return vector1, vector2
-
-    async def _calculate_similarity(self, text_vector: np.ndarray, other_vector: np.ndarray) -> float:
-        """
-        Calculate cosine similarity between two vectors.
-        
-        Args:
-            text_vector (np.ndarray): First vector
-            other_vector (np.ndarray): Second vector
-            
-        Returns:
-            float: Similarity score
+            List[Dict[str, Any]]: Closest articles
         """
         try:
-            if text_vector.size == 0 or other_vector.size == 0:
-                return 0.0
-                
-            text_vector, other_vector = self._pad_arrays(text_vector, other_vector)
-            return cosine_similarity(text_vector, other_vector)[0][0]
+            import numpy as np  
+            from sklearn.metrics.pairwise import cosine_similarity 
+            from umap import UMAP  
+            from sklearn.preprocessing import StandardScaler  
+            
+            # Combine query with all embeddings
+            combined_embeddings = np.vstack([query_embedding, all_embeddings])
+            
+            # Standardize embeddings
+            scaler = StandardScaler()
+            scaled_embeddings = scaler.fit_transform(combined_embeddings)
+            
+            # Apply UMAP for dimensionality reduction
+            # Use a reasonable n_components (e.g., min(50, embedding_dim-1))
+            n_components = min(50, scaled_embeddings.shape[1] - 1, scaled_embeddings.shape[0] - 1)
+            if n_components < 2:
+                n_components = 2
+            
+            umap_model = UMAP(
+                n_components=n_components,
+                n_neighbors=min(15, len(scaled_embeddings) - 1),
+                min_dist=0.1,
+                metric='cosine',
+                random_state=42
+            )
+            umap_embeddings = umap_model.fit_transform(scaled_embeddings)
+            
+            # Extract query embedding after UMAP
+            query_umap = umap_embeddings[0:1]
+            article_umap = umap_embeddings[1:]
+            
+            # Use cosine similarity on UMAP-reduced embeddings to find closest
+            similarities = cosine_similarity(query_umap, article_umap)[0]
+            
+            # Sort by similarity and return top results
+            top_indices = np.argsort(similarities)[::-1][:num_results]
+            
+            return [all_articles[idx] for idx in top_indices]
+            
         except Exception as e:
-            console.print(f"[red]Error calculating similarity: {e}[/red]")
-            return 0.0
+            get_console().print(f"[yellow]UMAP+HDBSCAN search failed, falling back to cosine similarity: {e}[/yellow]")
+            # Fallback to simple cosine similarity
+            import numpy as np  # type: ignore[import-untyped]
+            from sklearn.metrics.pairwise import cosine_similarity  # type: ignore[import-untyped]
+            similarities = cosine_similarity(query_embedding, all_embeddings)[0]
+            top_indices = np.argsort(similarities)[::-1][:num_results]
+            return [all_articles[idx] for idx in top_indices]
 
     async def find_closest_articles_by_text(self, text: str, table_name: str = "articles", num_results: int = 1) -> Optional[List[Dict[str, Any]]]:
         """
-        Find the most similar articles to the given text.
+        Find the most similar articles to the given text using UMAP + HDBSCAN.
         
         Args:
             text (str): Text to find similar articles for
@@ -187,53 +228,104 @@ class AppFlow:
         try:
             start_time = time.perf_counter_ns()  # Use nanoseconds for more precision
             
-            # Filter and encode the input text
-            text_filtered = filter_stopwords_in_text(text)
+            # Filter input text (keep stopwords for better embeddings)
+            # Note: We're not using stopword filtering for embeddings anymore
+            text_filtered = text.strip()
             if not text_filtered:
-                console.print("[yellow]No valid text content after filtering stopwords[/yellow]")
+                get_console().print("[yellow]No valid text content[/yellow]")
                 return None
 
-            # Encode the input text
+            # Encode the input text using sentence-transformers
             encode_start = time.perf_counter_ns()
-            text_vector = np.array(self.database.encode_text(text_filtered)).reshape(1, -1)
+            # Lazy import to avoid slow startup
+            from .embeddings import get_embedding_model
+            embedding_model = get_embedding_model()
+            query_embedding = embedding_model.encode_single(text_filtered)
             encode_time = (time.perf_counter_ns() - encode_start) / 1000  # Convert to microseconds
             
             # Get all articles from all tables
             load_start = time.perf_counter_ns()
+            import numpy as np  # type: ignore[import-untyped]
+            
             all_articles = []
-            for table_name in self.database.tables:
-                table = self.database.get_table(table_name)
+            all_embeddings = []
+            
+            for table_name_iter in self.database.tables:
+                table = self.database.get_table(table_name_iter)
                 if table:
                     articles = table.get_rows()
                     for article in articles:
-                        article['table_name'] = table_name  # Add table name to article
+                        article['table_name'] = table_name_iter  # Add table name to article
                         all_articles.append(article)
+                        
+                        # Get embedding from article (stored as encoded_data)
+                        embedding = article.get('encoded_data')
+                        if embedding is not None:
+                            if isinstance(embedding, list):
+                                # If it's a list, try to convert to numpy array
+                                embedding = np.array(embedding)
+                            elif not isinstance(embedding, np.ndarray):
+                                embedding = np.array(embedding)
+                            # Ensure it's 2D
+                            if embedding.ndim == 1:
+                                embedding = embedding.reshape(1, -1)
+                            all_embeddings.append(embedding)
+                        else:
+                            # If no embedding, create one on the fly
+                            content = article.get('content', '') or article.get('title', '')
+                            if content:
+                                embedding = embedding_model.encode_single(str(content))
+                                all_embeddings.append(embedding)
+                            else:
+                                # Zero vector as fallback
+                                try:
+                                    embedding_dim = embedding_model._model.get_sentence_embedding_dimension()
+                                except:
+                                    embedding_dim = 384  # Default dimension for all-MiniLM-L6-v2
+                                all_embeddings.append(np.zeros((1, embedding_dim)))
+            
             load_time = (time.perf_counter_ns() - load_start) / 1000  # Convert to microseconds
 
             if not all_articles:
-                console.print("[yellow]No articles found in any table[/yellow]")
+                get_console().print("[yellow]No articles found in any table[/yellow]")
                 return None
+            
+            # Convert embeddings list to numpy array
+            if all_embeddings:
+                # Stack all embeddings, handling different shapes
+                try:
+                    all_embeddings = np.vstack(all_embeddings)
+                except ValueError:
+                    # If shapes don't match, pad to same length
+                    max_len = max(emb.shape[1] for emb in all_embeddings if emb.ndim == 2)
+                    padded_embeddings = []
+                    for emb in all_embeddings:
+                        if emb.ndim == 1:
+                            emb = emb.reshape(1, -1)
+                        if emb.shape[1] < max_len:
+                            padding = np.zeros((1, max_len - emb.shape[1]))
+                            emb = np.hstack([emb, padding])
+                        padded_embeddings.append(emb)
+                    all_embeddings = np.vstack(padded_embeddings)
 
-            # Calculate similarities
+            # Find closest using UMAP + HDBSCAN
             similarity_start = time.perf_counter_ns()
+            from rich.progress import Progress, SpinnerColumn, TextColumn  # type: ignore[import-untyped]
             with Progress(
                 SpinnerColumn(),
                 TextColumn("[progress.description]{task.description}"),
-                console=console
+                console=get_console()
             ) as progress:
-                task = progress.add_task("Calculating similarities...", total=len(all_articles))
+                task = progress.add_task("Finding closest articles using UMAP+HDBSCAN...", total=None)
                 
-                similarities = await asyncio.gather(*[
-                    self._calculate_similarity(
-                        text_vector,
-                        np.array(article.get('encoded_data', [])).reshape(1, -1)
-                    )
-                    for article in all_articles
-                ])
+                results = await self._find_closest_using_umap_hdbscan(
+                    query_embedding,
+                    all_embeddings,
+                    all_articles,
+                    num_results
+                )
+            
             similarity_time = (time.perf_counter_ns() - similarity_start) / 1000  # Convert to microseconds
-
-            if not similarities:
-                return None
             
             # Store timing information
             self._timing_stats = {
@@ -243,12 +335,9 @@ class AppFlow:
                 'total_time': (time.perf_counter_ns() - start_time) / 1000  # Convert to microseconds
             }
             
-            if num_results == 1:
-                closest_index = np.argmax(similarities)
-                return all_articles[closest_index]
-            else:
-                sorted_articles = [article for _, article in sorted(zip(similarities, all_articles), key=lambda pair: pair[0], reverse=True)]
-                return sorted_articles[:num_results]
+            if num_results == 1 and results:
+                return results[0] if isinstance(results, list) and len(results) == 1 else results
+            return results if isinstance(results, list) else [results] if results else None
         except (LoadingException, EncodingError):
             raise
         except Exception as err:

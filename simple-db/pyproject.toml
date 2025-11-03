@@ -1,32 +1,43 @@
-[tool.poetry]
+[project]
 name = "svdb"
 version = "0.0.0"
-description = "No ML implementation of vector database, from scratch."
-authors = ["Nishanth Ravindran <ravindranno2@gmail.com>"]
+description = "No ML implementation of vector database, from scratch. Stage 2 uses ML models for embeddings and similarity search."
+authors = [
+    {name = "Nishanth Ravindran", email = "ravindranno2@gmail.com"}
+]
+requires-python = ">=3.10"
+dependencies = [
+    # CLI framework
+    "typer>=0.15.1",
+    # Rich terminal output (imported as 'rich')
+    "rich>=13.7.0",
+    # HTTP clients
+    "aiohttp>=3.9.3",
+    "aiohttp-socks>=0.8.4",
+    "httpx>=0.26.0",
+    "requests>=2.32.3",
+    "urllib3>=2.2.1",
+    # Web scraping
+    "beautifulsoup4>=4.12.3",  # imported as 'bs4'
+    "soupsieve>=2.6",
+    # ML and embeddings
+    "sentence-transformers>=2.7.0",  # imported as 'sentence_transformers'
+    "numpy>=2.2.2",
+    "scikit-learn>=1.4.1",  # imported as 'sklearn'
+    "umap-learn>=0.5.6",  # imported as 'umap'
+    "hdbscan>=0.8.40",
+    # NLP
+    "nltk>=3.9.1",
+    # Other utilities
+    "python-multipart>=0.0.9",
+    "typing-extensions>=4.9.0",
+    "uvicorn>=0.27.1",
+    "cryptography>=42.0.5",
+]
 
-[tool.poetry.dependencies]
-python = "^3.10"
-typer = "^0.15.1"
-requests = "^2.32.3"
-nltk = "^3.9.1"
-numpy = "^2.2.2"
-beautifulsoup4 = "^4.12.3"
-soupsieve = "^2.6"
-aiohttp = "^3.9.3"
-rich = "^13.7.0"
-scikit-learn = "^1.4.1"
-python-multipart = "^0.0.9"
-typing-extensions = "^4.9.0"
-aiohttp-socks = "^0.8.4"
-uvicorn = "^0.27.1"
-httpx = "^0.26.0"
-cryptography = "^42.0.5"
-urllib3 = "^2.2.1"
-
-
-[tool.poetry.scripts]
+[project.scripts]
 vdb = "svdb.main:app"
 
 [build-system]
-requires = ["poetry-core>=1.0.0"]
-build-backend = "poetry.core.masonry.api"
+requires = ["hatchling"]
+build-backend = "hatchling.build"

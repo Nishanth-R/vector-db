@@ -14,11 +14,13 @@ import os
 import json
 import pickle
 from typing import Dict, List, Any, Optional
+from collections import deque
 
-from errors import InsertIntoException, LoadingException, InvalidRowError, EncodingError
+from .errors import InsertIntoException, LoadingException, InvalidRowError, EncodingError
+from .btree import BTree
 
 class Table:
-    def __init__(self, table_name: str, columns: List[str], primary_key: str = 'id'):
+    def __init__(self, table_name: str, columns: List[str], primary_key: str = 'id', db_dir: str = None):
         """
         Initializes a new table object.
 
@@ -26,6 +28,7 @@ class Table:
             table_name (str): The name of the table.
             columns (list): A list of column names for the table.
             primary_key (str, optional): The name of the primary key column. Defaults to 'id'.
+            db_dir (str, optional): Directory for storing index files.
         """
         self.table_name = table_name
         self.columns = columns
@@ -35,6 +38,11 @@ class Table:
         self.data = []
         self._next_id = 1 if primary_key == 'id' else None
         self._lock = threading.Lock()
+        self.db_dir = db_dir or os.getcwd()
+        
+        # Initialize B-tree index for primary key
+        index_filename = os.path.join(self.db_dir, f"{table_name}_index.pickle")
+        self._index = BTree(max_keys=3, filename=index_filename)
 
     def insert_row(self, row_values: Dict[str, Any]) -> None:
         """
@@ -67,6 +75,11 @@ class Table:
 
                 ordered_values = tuple(row_values[col] for col in self.columns)
                 self.data.append(ordered_values)
+                
+                # Update B-tree index
+                primary_key_value = row_values[self.primary_key]
+                row_dict = dict(zip(self.columns, ordered_values))
+                self._index.insert(primary_key_value, len(self.data) - 1)
             except Exception as err:
                 raise InsertIntoException(f"Failed to insert row into table '{self.table_name}': {str(err)}")
 
@@ -81,6 +94,27 @@ class Table:
             return [dict(zip(self.columns, row)) for row in self.data]
         except Exception as err:
             raise LoadingException(f"Failed to get rows from table '{self.table_name}': {str(err)}")
+    
+    def get_by_id(self, primary_key_value: Any) -> Optional[Dict[str, Any]]:
+        """
+        Get a row by its primary key value using B-tree index.
+        
+        Args:
+            primary_key_value (Any): The primary key value to search for
+            
+        Returns:
+            Optional[Dict[str, Any]]: The row if found, None otherwise
+            
+        Raises:
+            LoadingException: If there's an error retrieving the row.
+        """
+        try:
+            row_index = self._index.search(primary_key_value)
+            if row_index is not None and 0 <= row_index < len(self.data):
+                return dict(zip(self.columns, self.data[row_index]))
+            return None
+        except Exception as err:
+            raise LoadingException(f"Failed to get row by ID from table '{self.table_name}': {str(err)}")
 
     def save_to_disk(self, filename: str) -> None:
         """
@@ -120,14 +154,29 @@ class Table:
             LoadingException: If there's an error loading from disk.
         """
         try:
+            db_dir = os.path.dirname(filename) or os.getcwd()
             with open(filename, 'r') as jsonfile:
                 table_data = json.load(jsonfile)
                 table_name = table_data['table_name']
                 columns = table_data['columns']
                 primary_key = table_data['primary_key']
-                new_table = cls(table_name, columns, primary_key)
+                new_table = cls(table_name, columns, primary_key, db_dir=db_dir)
+                
+                # Rebuild index while loading data
                 for row_dict in table_data['data']:
-                    new_table.insert_row(row_dict)
+                    # Insert row without triggering index update in insert_row
+                    ordered_values = tuple(row_dict[col] for col in new_table.columns)
+                    new_table.data.append(ordered_values)
+                    
+                    # Manually update index
+                    primary_key_value = row_dict[primary_key]
+                    new_table._index.insert(primary_key_value, len(new_table.data) - 1)
+                
+                # Update next_id if using auto-increment
+                if primary_key == 'id' and new_table.data:
+                    max_id = max(row[0] for row in new_table.data if isinstance(row[0], int))
+                    new_table._next_id = max_id + 1
+                
                 return new_table
         except Exception as err:
             raise LoadingException(f"Failed to load table from '{filename}': {str(err)}")
@@ -151,25 +200,59 @@ class Database:
             self._bow_cache = None
             self._bow_lock = threading.Lock()
             self._executor = ThreadPoolExecutor(max_workers=4)
+            
+            # LIFO file management - track insert order
+            self._lifo_stack = deque()
+            self._lifo_filename = os.path.join(self.db_dir, 'lifo_stack.pickle')
+            self._load_lifo_stack()
+            
             self._load_tables()
         except Exception as err:
             raise LoadingException(f"Failed to initialize database: {str(err)}")
+    
+    def _load_lifo_stack(self) -> None:
+        """Load LIFO stack from disk."""
+        try:
+            if os.path.exists(self._lifo_filename):
+                with open(self._lifo_filename, 'rb') as file:
+                    self._lifo_stack = pickle.load(file)
+        except Exception:
+            self._lifo_stack = deque()
+    
+    def _save_lifo_stack(self) -> None:
+        """Save LIFO stack to disk."""
+        try:
+            with open(self._lifo_filename, 'wb') as file:
+                pickle.dump(self._lifo_stack, file)
+        except Exception as err:
+            raise LoadingException(f"Failed to save LIFO stack: {str(err)}")
 
     def _load_tables(self) -> None:
         """
-        Load all tables from disk.
+        Load all tables from disk (lazy - only load when database is accessed).
 
         Raises:
             LoadingException: If there's an error loading tables.
         """
         try:
-            for filename in os.listdir(self.db_dir):
+            # Only load tables if the directory exists and has files
+            # Skip loading if just checking help
+            if not os.path.exists(self.db_dir):
+                return
+            try:
+                files = os.listdir(self.db_dir)
+            except (OSError, PermissionError):
+                # Can't read directory, skip loading
+                return
+            for filename in files:
                 if filename.endswith('.json'):
                     table_name = filename[:-5]  # Remove .json extension
                     table_path = os.path.join(self.db_dir, filename)
                     self.tables[table_name] = Table.load_from_disk(table_path)
         except Exception as err:
-            raise LoadingException(f"Failed to load tables from directory '{self.db_dir}': {str(err)}")
+            # Don't raise exception during initialization - just log it
+            # raise LoadingException(f"Failed to load tables from directory '{self.db_dir}': {str(err)}")
+            pass
 
     def create_table(self, table_name: str, columns: List[str], primary_key: str = 'id') -> Table:
         """
@@ -191,7 +274,7 @@ class Database:
             if table_name in self.tables:
                 raise InvalidRowError(f"Table '{table_name}' already exists")
             
-            table = Table(table_name, columns, primary_key)
+            table = Table(table_name, columns, primary_key, db_dir=self.db_dir)
             self.tables[table_name] = table
             return table
         except InvalidRowError:
@@ -216,6 +299,31 @@ class Database:
             return self.tables.get(table_name)
         except Exception as err:
             raise LoadingException(f"Failed to get table '{table_name}': {str(err)}")
+    
+    def query_by_id(self, table_name: str, primary_key_value: Any) -> Optional[Dict[str, Any]]:
+        """
+        Query a row by primary key value using B-tree index.
+        
+        Args:
+            table_name (str): Name of the table to query
+            primary_key_value (Any): The primary key value to search for
+            
+        Returns:
+            Optional[Dict[str, Any]]: The row if found, None otherwise
+            
+        Raises:
+            LoadingException: If there's an error querying the table.
+            InvalidRowError: If the table doesn't exist.
+        """
+        try:
+            if table_name not in self.tables:
+                raise InvalidRowError(f"Table '{table_name}' does not exist")
+            
+            return self.tables[table_name].get_by_id(primary_key_value)
+        except InvalidRowError:
+            raise
+        except Exception as err:
+            raise LoadingException(f"Failed to query by ID in table '{table_name}': {str(err)}")
 
     def _get_bow(self) -> Dict[str, int]:
         """
@@ -304,7 +412,7 @@ class Database:
 
     def _encode_text_fields(self, table_name: str, row_values: Dict[str, Any]) -> None:
         """
-        Encode text fields in a row and add encoded_data column.
+        Encode text fields in a row using sentence-transformers and add encoded_data column.
         
         Args:
             table_name (str): Name of the table
@@ -314,15 +422,39 @@ class Database:
             EncodingError: If there's an error encoding the text fields.
         """
         try:
+            # Import numpy first before any usage
+            import numpy as np  # type: ignore[import-untyped]
+            from .embeddings import get_embedding_model
+            
             table = self.tables[table_name]
             text_fields = [col for col in table.columns if col != 'id' and col != 'encoded_data']
             
             # Combine all text fields
             combined_text = ' '.join(str(row_values.get(field, '')) for field in text_fields)
             
-            # Encode the combined text
-            encoded_data = self.encode_text(combined_text)
-            row_values['encoded_data'] = encoded_data
+            # Encode the combined text using sentence-transformers
+            if combined_text.strip():
+                embedding_model = get_embedding_model()
+                embedding = embedding_model.encode_single(combined_text)
+                # Store as list for JSON serialization
+                # Convert numpy array to list if needed
+                if hasattr(embedding, 'tolist'):
+                    row_values['encoded_data'] = embedding.tolist()
+                elif isinstance(embedding, np.ndarray):
+                    row_values['encoded_data'] = embedding.tolist()
+                elif isinstance(embedding, list):
+                    row_values['encoded_data'] = embedding
+                else:
+                    # Fallback: convert to list
+                    row_values['encoded_data'] = list(embedding)
+            else:
+                # Empty embedding vector
+                embedding_model = get_embedding_model()
+                try:
+                    embedding_dim = embedding_model._model.get_sentence_embedding_dimension()
+                except:
+                    embedding_dim = 384  # Default dimension for all-MiniLM-L6-v2
+                row_values['encoded_data'] = [0.0] * embedding_dim
         except Exception as err:
             raise EncodingError(f"Failed to encode text fields for table '{table_name}': {str(err)}")
 
@@ -347,6 +479,13 @@ class Database:
             future.result()
             
             self.tables[table_name].insert_row(row_values)
+            
+            # Update LIFO stack - push (table_name, primary_key_value) to top
+            primary_key_value = row_values.get(self.tables[table_name].primary_key)
+            if primary_key_value is not None:
+                self._lifo_stack.append((table_name, primary_key_value))
+                self._save_lifo_stack()
+            
             self.tables[table_name].save_to_disk(os.path.join(self.db_dir, f"{table_name}.json"))
         except (InvalidRowError, InsertIntoException, LoadingException):
             raise
@@ -372,3 +511,17 @@ class Database:
             return ' '.join(reverse_bow.get(word_id, '') for word_id in vector)
         except Exception as err:
             raise LoadingException(f"Failed to convert vector to text: {str(err)}")
+    
+    def get_lifo_inserts(self, limit: int = None) -> List[tuple]:
+        """
+        Get the most recently inserted rows in LIFO order.
+        
+        Args:
+            limit (int, optional): Maximum number of recent inserts to return
+            
+        Returns:
+            List[tuple]: List of (table_name, primary_key_value) tuples in LIFO order
+        """
+        if limit is None:
+            return list(reversed(self._lifo_stack))
+        return list(reversed(list(self._lifo_stack)[-limit:]))

@@ -1,0 +1,6 @@
+[package]
+name = "mara-sdk"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -1,0 +1,67 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/mara-proto",
+    "crates/mara-auth",
+    "crates/mara-embed",
+    "crates/mara-storage",
+    "crates/mara-chunker",
+    "crates/mara-index-vector",
+    "crates/mara-index-bm25",
+    "crates/mara-fusion",
+    "crates/mara-daemon",
+    "crates/marad",
+    "crates/mara-client",
+    "crates/mara-sdk",
+    "crates/mara-cli",
+    "crates/mara-api",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+repository = "https://github.com/nishanth-r/mara"
+
+[workspace.dependencies]
+# intra-workspace
+mara-proto = { path = "crates/mara-proto" }
+mara-auth = { path = "crates/mara-auth" }
+mara-embed = { path = "crates/mara-embed" }
+mara-storage = { path = "crates/mara-storage" }
+mara-chunker = { path = "crates/mara-chunker" }
+mara-index-vector = { path = "crates/mara-index-vector" }
+mara-index-bm25 = { path = "crates/mara-index-bm25" }
+mara-fusion = { path = "crates/mara-fusion" }
+mara-daemon = { path = "crates/mara-daemon" }
+mara-client = { path = "crates/mara-client" }
+mara-sdk = { path = "crates/mara-sdk" }
+mara-api = { path = "crates/mara-api" }
+
+# shared external deps
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+bincode = { version = "2", features = ["serde"] }
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+chrono = { version = "0.4", features = ["serde"] }
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+roaring = { version = "0.10", features = ["serde"] }
+parking_lot = "0.12"
+crc32c = "0.6"
+blake3 = "1"
+base64 = "0.22"
+rand = "0.8"
+rand_chacha = "0.3"
+proptest = "1"
+tempfile = "3"
+toml = "0.8"
+crossbeam-channel = "0.5"
+wide = "1"
+rayon = "1"
+
+[profile.release]
+opt-level = 3
+lto = "thin"

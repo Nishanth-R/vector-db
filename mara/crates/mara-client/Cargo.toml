@@ -1,0 +1,6 @@
+[package]
+name = "mara-client"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

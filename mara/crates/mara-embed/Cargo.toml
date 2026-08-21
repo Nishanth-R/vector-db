@@ -1,0 +1,36 @@
+[package]
+name = "mara-embed"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mara-proto.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+parking_lot.workspace = true
+blake3.workspace = true
+# default-features off: fastembed's own defaults pull in `image-models`
+# (CLIP/image embeddings — irrelevant to a text-only RAG store, and a real
+# binary-size cost, per the master plan's "Binary size note") and
+# native-tls. rustls keeps the TLS stack pure-Rust rather than depending on
+# a system OpenSSL, which matters for a CLI meant to build cleanly on a
+# fresh machine.
+fastembed = { version = "6", optional = true, default-features = false, features = [
+    "hf-hub-rustls-tls",
+    "ort-download-binaries-rustls-tls",
+] }
+
+[features]
+default = ["fastembed-backend"]
+# Gates the real ONNX-backed implementation (and the fastembed dependency
+# itself) behind a feature, per the master plan's default-on `embedded`
+# cargo feature: `cargo build --no-default-features` drops it entirely for
+# a slim socket-only client build. Model *resolution* (string -> dim, via
+# fastembed's static model metadata, no download involved) also lives
+# behind this feature since it needs the `fastembed` crate's types; a
+# client built without it never needs to resolve a model locally anyway —
+# it talks to a daemon that already has.
+fastembed-backend = ["dep:fastembed"]
+
+[dev-dependencies]
+tempfile.workspace = true

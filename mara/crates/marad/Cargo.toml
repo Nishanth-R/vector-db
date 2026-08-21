@@ -1,0 +1,10 @@
+[package]
+name = "marad"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "marad"
+path = "src/main.rs"
+
+[dependencies]

@@ -1,0 +1,6 @@
+[package]
+name = "mara-chunker"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

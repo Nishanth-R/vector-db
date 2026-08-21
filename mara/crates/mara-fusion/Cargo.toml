@@ -1,0 +1,6 @@
+[package]
+name = "mara-fusion"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

@@ -1,0 +1,6 @@
+[package]
+name = "mara-daemon"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

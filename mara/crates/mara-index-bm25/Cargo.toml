@@ -1,0 +1,6 @@
+[package]
+name = "mara-index-bm25"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]

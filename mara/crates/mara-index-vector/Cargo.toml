@@ -1,0 +1,15 @@
+[package]
+name = "mara-index-vector"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mara-proto.workspace = true
+mara-storage.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+roaring.workspace = true
+wide.workspace = true
+rayon.workspace = true
+
+[dev-dependencies]

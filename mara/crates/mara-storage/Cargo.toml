@@ -1,0 +1,23 @@
+[package]
+name = "mara-storage"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+mara-proto.workspace = true
+mara-auth.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+bincode.workspace = true
+thiserror.workspace = true
+uuid.workspace = true
+chrono.workspace = true
+roaring.workspace = true
+parking_lot.workspace = true
+crc32c.workspace = true
+base64.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+proptest.workspace = true

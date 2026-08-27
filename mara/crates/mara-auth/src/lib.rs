@@ -9,7 +9,7 @@ pub mod store;
 pub mod token;
 
 pub use audit::{
-    prune_older_than, AuditConfig, AuditError, AuditFsync, AuditMode, AuditOutcome,
+    prune_older_than, read_recent, AuditConfig, AuditError, AuditFsync, AuditMode, AuditOutcome,
     AuditPrincipal, AuditRecord, AuditSink, AuditSource, JsonlAuditSink,
 };
 pub use capability::{can_use_undo_scope, require, Capability};

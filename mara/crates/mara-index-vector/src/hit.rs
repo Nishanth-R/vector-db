@@ -15,3 +15,16 @@ pub struct SearchHit {
     pub metric: DistanceMetric,
     pub exact: bool,
 }
+
+/// A `VectorIndex::search` call's full outcome (master plan Layer 4,
+/// *Filtered search*): `hits`, plus whether the filtered-ANN/plain-ANN
+/// escalation hit its `filter_nprobe_max`/`nlist` cap before reaching a
+/// full `k` post-filter candidates. `truncated_by_filter` is the plan's
+/// explicit alternative to a silent short return — a caller can tell the
+/// difference between "there genuinely aren't `k` matching rows" and
+/// "there might be, but the escalation budget ran out first."
+#[derive(Clone, Debug, PartialEq)]
+pub struct SearchResult {
+    pub hits: Vec<SearchHit>,
+    pub truncated_by_filter: bool,
+}

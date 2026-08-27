@@ -207,6 +207,122 @@ impl Collection {
         Ok(())
     }
 
+    /// This collection's highest applied LSN, or `None` if it has never
+    /// applied a single record. Deliberately not a bare `Lsn` defaulting to
+    /// `Lsn::ZERO` for "nothing yet": `Lsn::ZERO` is a genuinely valid LSN
+    /// — the very first record any collection's WAL ever writes lands
+    /// exactly there — so collapsing "nothing applied" and "the first
+    /// record is the latest one applied" onto the same sentinel value
+    /// would make a fresh replication follower's very first catch-up
+    /// request skip that first record. What a replication follower reports
+    /// (as its resume cursor) and what a leader's [`Collection::
+    /// wal_lines_after`] takes to decide where an incoming follower's
+    /// WAL-tail read should start — `None` means "send everything,
+    /// including the first record ever written."
+    pub fn last_applied_lsn(&self) -> Option<Lsn> {
+        let writer = self.wal.as_ref()?;
+        if writer.current_lsn() == Lsn::ZERO {
+            // The writer's next-append position is still at the very
+            // start — nothing has ever been durably appended.
+            return None;
+        }
+        Some(self.inner.read().last_applied_lsn)
+    }
+
+    /// This collection's payload schema, as `(field name, type)` pairs —
+    /// what a replication leader sends a fresh follower so it can
+    /// `create_collection` a matching local copy before any WAL streaming
+    /// begins.
+    pub fn schema_fields(&self) -> Vec<(String, crate::payload::FieldType)> {
+        self.inner.read().payload.schema().iter().cloned().collect()
+    }
+
+    /// Leader side of replication: every WAL record strictly after
+    /// `after_lsn` (`None` meaning "from the very first record"),
+    /// re-serialized as raw JSONL lines ready to hand to a follower's
+    /// [`Collection::apply_replicated_lines`], paired with the resume
+    /// cursor to pass as `after_lsn` on the *next* call — the last
+    /// returned record's own LSN, or `after_lsn` unchanged when there was
+    /// nothing new. Returning this here (rather than making the caller
+    /// derive it, e.g. from `last_applied_lsn()` taken *after* this call)
+    /// is what keeps a poll loop race-free: this collection can keep
+    /// accepting new local writes between one poll and the next, and a
+    /// cursor derived from "whatever's newest right now" instead of "the
+    /// last record actually included in *this* batch" would silently skip
+    /// whatever landed in that window. Reuses `wal::replay_all`'s already
+    /// checksum-verified read path rather than a second, parallel
+    /// raw-tailing mechanism. A non-durable collection (`self.wal` is
+    /// `None`) never has anything to stream.
+    pub fn wal_lines_after(&self, after_lsn: Option<Lsn>) -> StorageResult<(Vec<String>, Option<Lsn>)> {
+        let Some(writer) = &self.wal else {
+            return Ok((Vec::new(), after_lsn));
+        };
+        let replay = wal::replay_all(writer.dir(), after_lsn).map_err(|e| StorageError::Wal(e.to_string()))?;
+        let new_cursor = replay.records.last().map(|r| r.lsn).or(after_lsn);
+        let lines = replay.records.iter().map(|r| serde_json::to_string(r).expect("WalRecord always serializes")).collect();
+        Ok((lines, new_cursor))
+    }
+
+    /// Follower side of replication: applies WAL lines received verbatim
+    /// from a leader. Parses and checksum-verifies each one (the same
+    /// trust boundary `replay_all` enforces reading a local file — a
+    /// replicated line is no more trusted than one this process wrote
+    /// itself), appends them to this collection's own local WAL preserving
+    /// the leader's exact LSNs (never minting fresh ones — see
+    /// `WalWriter::append_replicated_batch`), applies them to in-memory
+    /// state via the same `apply_replayed_records` startup recovery uses,
+    /// and notifies this collection's own subscribers (`LiveIndex`, BM25)
+    /// exactly as a live local write would: a follower's derived indexes
+    /// stay current on their own local trigger, never by receiving an
+    /// index shipped over the wire.
+    pub fn apply_replicated_lines(&self, lines: &[String]) -> StorageResult<()> {
+        if lines.is_empty() {
+            return Ok(());
+        }
+        let mut records = Vec::with_capacity(lines.len());
+        for line in lines {
+            let record: WalRecord = serde_json::from_str(line).map_err(|e| StorageError::Wal(format!("malformed replicated WAL line: {e}")))?;
+            if !wal::verify_checksum(&record) {
+                return Err(StorageError::Wal(format!("replicated WAL line for lsn {} failed checksum verification", record.lsn)));
+            }
+            records.push(record);
+        }
+
+        if let Some(writer) = &self.wal {
+            writer.append_replicated_batch(&records).map_err(|e| StorageError::Wal(e.to_string()))?;
+        }
+
+        let mut guard = self.inner.write();
+        crate::recovery::apply_replayed_records(&mut guard, &records)?;
+        drop(guard);
+
+        // Records from more than one leader-side transaction can arrive in
+        // the same batch; each still gets its own `ChangeBatch` (grouped
+        // by `txn`, mirroring how `apply_replayed_records` itself groups
+        // by consecutive `txn` runs) so a subscriber sees the same
+        // transaction boundaries a live write would have produced.
+        // `change_events_from_records` is called per-group, not once over
+        // the whole batch then sliced — it `filter_map`s out control
+        // records with no `row_id`, so a slice of the whole-batch output
+        // wouldn't stay index-aligned with `records[i..j]` once any
+        // earlier group contained one.
+        let mut i = 0;
+        while i < records.len() {
+            let txn_id = records[i].txn;
+            let mut j = i + 1;
+            while j < records.len() && records[j].txn == txn_id {
+                j += 1;
+            }
+            self.notify(ChangeBatch {
+                txn_id,
+                coll: self.name.clone(),
+                events: crate::recovery::change_events_from_records(&records[i..j]),
+            });
+            i = j;
+        }
+        Ok(())
+    }
+
     /// Compiles a `Filter` against this collection's live rows.
     /// `Filter::DocIn` is resolved here, against the doc registry;
     /// everything else is delegated to the columnar payload store.
@@ -505,6 +621,25 @@ impl Collection {
             .collect()
     }
 
+    /// Full `Row`s by id, in `ids`' order — what a candidate-set index
+    /// (posting lists, ANN graphs) reranks and reports from, once it has
+    /// `RowId`s rather than keys. Unlike `fetch_vectors`, this is
+    /// liveness-checked: `guard.rows` keeps a deleted row's record around
+    /// for undo, so a `RowId` a candidate set collected before a
+    /// since-then delete comes back `None` here rather than silently
+    /// resurfacing stale data an index hasn't been rebuilt to drop yet.
+    pub fn rows_by_id(&self, ids: &[RowId]) -> Vec<Option<Row>> {
+        let guard = self.inner.read();
+        ids.iter()
+            .map(|id| {
+                if !guard.live.contains(id.to_bitmap_index()) {
+                    return None;
+                }
+                guard.rows.get(id).map(|rec| Self::to_row(*id, rec))
+            })
+            .collect()
+    }
+
     pub fn active_count(&self) -> u64 {
         self.inner.read().live.len()
     }
@@ -649,6 +784,25 @@ mod tests {
         assert_eq!(result[1], None);
     }
 
+    #[test]
+    fn rows_by_id_returns_full_rows_in_the_requested_order() {
+        let c = coll();
+        let id_a = c.put(&ctx(), "a", vec![1.0, 2.0, 3.0], PayloadRow::new(), None).unwrap();
+        let id_b = c.put(&ctx(), "b", vec![4.0, 5.0, 6.0], PayloadRow::new(), None).unwrap();
+        let rows = c.rows_by_id(&[id_b, id_a]);
+        assert_eq!(rows[0].as_ref().unwrap().key, "b");
+        assert_eq!(rows[1].as_ref().unwrap().key, "a");
+    }
+
+    #[test]
+    fn rows_by_id_hides_a_deleted_row_even_though_its_record_survives_for_undo() {
+        let c = coll();
+        let id = c.put(&ctx(), "a", vec![1.0, 2.0, 3.0], PayloadRow::new(), None).unwrap();
+        c.delete(&ctx(), "a").unwrap();
+        let rows = c.rows_by_id(&[id]);
+        assert_eq!(rows[0], None, "a candidate set built before the delete must not resurface stale data");
+    }
+
     struct CountingSubscriber {
         batches: AtomicUsize,
         last_event_count: Mutex<usize>,
@@ -682,6 +836,62 @@ mod tests {
 
         assert_eq!(sub.batches.load(Ordering::SeqCst), 1, "one ChangeBatch per put_batch call");
         assert_eq!(*sub.last_event_count.lock().unwrap(), 50);
+    }
+
+    struct TextCapturingSubscriber {
+        texts: Mutex<Vec<Option<String>>>,
+    }
+
+    impl ChangeSubscriber for TextCapturingSubscriber {
+        fn on_change(&self, batch: &ChangeBatch) {
+            let mut texts = self.texts.lock().unwrap();
+            for e in &batch.events {
+                let t = match e {
+                    crate::change::ChangeEvent::Insert { text, .. } => text.clone(),
+                    crate::change::ChangeEvent::Update { text, .. } => text.clone(),
+                    crate::change::ChangeEvent::Delete { text, .. } => text.clone(),
+                };
+                texts.push(t.map(|t| t.to_string()));
+            }
+        }
+    }
+
+    #[test]
+    fn change_events_carry_the_rows_text_for_a_document_insert_and_delete() {
+        let c = coll();
+        let sub = Arc::new(TextCapturingSubscriber { texts: Mutex::new(Vec::new()) });
+        c.subscribe(sub.clone());
+
+        c.put_document(
+            &ctx(),
+            crate::document::PutDocumentInput {
+                doc_key: "onboarding.md".into(),
+                chunks: vec![crate::document::ChunkInput {
+                    text: "hello world chunk text".into(),
+                    vector: vec![1.0, 0.0, 0.0],
+                }],
+                doc_payload: PayloadRow::new(),
+                chunk_spec: mara_proto::ChunkSpec::default(),
+                source: None,
+                embedding_model: mara_proto::ModelFingerprint {
+                    model_id: "test".into(),
+                    revision: None,
+                    dim: 3,
+                },
+            },
+        )
+        .unwrap();
+
+        {
+            let texts = sub.texts.lock().unwrap();
+            assert_eq!(texts.len(), 1);
+            assert_eq!(texts[0].as_deref(), Some("hello world chunk text"));
+        }
+
+        c.delete_document(&ctx(), "onboarding.md").unwrap();
+        let texts = sub.texts.lock().unwrap();
+        assert_eq!(texts.len(), 2, "the delete's ChangeEvent must also have arrived");
+        assert_eq!(texts[1].as_deref(), Some("hello world chunk text"), "a delete's ChangeEvent must carry the text the row was indexed under, from the undo payload");
     }
 
     #[test]

@@ -78,7 +78,7 @@ impl TokenStore {
             })?;
         }
         let mut principals: Vec<PrincipalRecord> = self.principals.read().values().cloned().collect();
-        principals.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        principals.sort_by_key(|a| a.created_at);
         let toml_str = toml::to_string_pretty(&TokensFile { principals })?;
         fs::write(&self.path, &toml_str).map_err(|source| TokenStoreError::Io {
             path: self.path.clone(),
@@ -118,7 +118,7 @@ impl TokenStore {
 
     pub fn list(&self) -> Vec<PrincipalRecord> {
         let mut v: Vec<_> = self.principals.read().values().cloned().collect();
-        v.sort_by(|a, b| a.created_at.cmp(&b.created_at));
+        v.sort_by_key(|a| a.created_at);
         v
     }
 

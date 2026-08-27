@@ -16,24 +16,30 @@ use std::str::FromStr;
 pub struct Lsn(u64);
 
 impl Lsn {
+    /// The smallest possible LSN, at segment 0 offset 0.
     pub const ZERO: Lsn = Lsn(0);
 
+    /// Packs a segment id and byte offset into an `Lsn`.
     pub fn new(segment_id: u32, byte_offset: u32) -> Self {
         Lsn(((segment_id as u64) << 32) | byte_offset as u64)
     }
 
+    /// The WAL segment number component.
     pub fn segment_id(&self) -> u32 {
         (self.0 >> 32) as u32
     }
 
+    /// The byte offset within the segment.
     pub fn byte_offset(&self) -> u32 {
         (self.0 & 0xFFFF_FFFF) as u32
     }
 
+    /// The raw packed `u64` representation.
     pub fn as_u64(&self) -> u64 {
         self.0
     }
 
+    /// Reconstructs an `Lsn` from its raw packed `u64` representation.
     pub fn from_u64(v: u64) -> Self {
         Lsn(v)
     }
@@ -45,12 +51,16 @@ impl fmt::Display for Lsn {
     }
 }
 
+/// Errors parsing an `Lsn` from its `"segment/offset"` string form.
 #[derive(Debug, thiserror::Error)]
 pub enum LsnParseError {
+    /// The string wasn't in `"segment/offset"` form at all.
     #[error("invalid LSN format {0:?}, expected \"segment/offset\" hex")]
     BadFormat(String),
+    /// The segment part wasn't valid hex.
     #[error("invalid LSN segment hex {0:?}")]
     BadSegment(String),
+    /// The offset part wasn't valid hex.
     #[error("invalid LSN offset hex {0:?}")]
     BadOffset(String),
 }

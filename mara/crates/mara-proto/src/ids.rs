@@ -1,11 +1,12 @@
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 /// Dense, monotonic, per-collection row identifier. Never reused, even after
 /// a delete — that's what lets tombstone bitmaps and `last_txn` conflict
 /// detection stay correct without a compaction pass.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, ToSchema)]
 pub struct RowId(pub u64);
 
 impl fmt::Display for RowId {
@@ -27,13 +28,14 @@ impl RowId {
             .expect("RowId exceeded u32::MAX — RoaringBitmap-based indexes need a redesign at this scale")
     }
 
+    /// Reconstructs a `RowId` from a `RoaringBitmap` index value.
     pub fn from_bitmap_index(v: u32) -> Self {
         RowId(v as u64)
     }
 }
 
 /// Dense, monotonic, per-collection document identifier. Never reused.
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Serialize, Deserialize, ToSchema)]
 pub struct DocId(pub u64);
 
 impl fmt::Display for DocId {
@@ -55,6 +57,7 @@ impl fmt::Display for TxnId {
 }
 
 impl TxnId {
+    /// Mints a fresh, random transaction id.
     pub fn new() -> Self {
         TxnId(Uuid::new_v4())
     }

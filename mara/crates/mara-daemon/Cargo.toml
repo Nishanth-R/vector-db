@@ -4,3 +4,30 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+mara-proto.workspace = true
+mara-auth.workspace = true
+mara-storage.workspace = true
+mara-index-vector.workspace = true
+mara-index-bm25.workspace = true
+mara-fusion.workspace = true
+mara-chunker.workspace = true
+mara-embed.workspace = true
+parking_lot.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+bytes.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+toml.workspace = true
+thiserror.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+uuid.workspace = true
+fd-lock.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+tempfile.workspace = true

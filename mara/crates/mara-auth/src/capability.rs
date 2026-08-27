@@ -16,6 +16,7 @@ pub enum Capability {
     Put,
     PutBatch,
     PutDocument,
+    Delete,
     Undo,
     // Admin
     Config,
@@ -26,6 +27,7 @@ pub enum Capability {
     AlterSchema,
     TokenManagement,
     ReplicationAdmin,
+    AuditRead,
     // Replica
     ReplicaHello,
     WalStream,
@@ -34,6 +36,10 @@ pub enum Capability {
 /// `Role -> Capability` authorization table. One `match` arm per
 /// `(role, capability)` pair that's allowed; anything not listed here falls
 /// through to the `_ => false` at the bottom and is denied.
+// Deliberately not collapsed into a single `matches!` expression despite
+// clippy's suggestion: one arm per line is the "one readable, auditable
+// table" this function exists to be.
+#[allow(clippy::match_like_matches_macro)]
 pub fn require(role: Role, cap: Capability) -> bool {
     use Capability::*;
     use Role::*;
@@ -47,6 +53,7 @@ pub fn require(role: Role, cap: Capability) -> bool {
         (Writer | Admin, Put) => true,
         (Writer | Admin, PutBatch) => true,
         (Writer | Admin, PutDocument) => true,
+        (Writer | Admin, Delete) => true,
         (Writer | Admin, Undo) => true,
 
         (Admin, Config) => true,
@@ -57,6 +64,7 @@ pub fn require(role: Role, cap: Capability) -> bool {
         (Admin, AlterSchema) => true,
         (Admin, TokenManagement) => true,
         (Admin, ReplicationAdmin) => true,
+        (Admin, AuditRead) => true,
 
         (Replica, ReplicaHello) => true,
         (Replica, WalStream) => true,
@@ -99,6 +107,13 @@ mod tests {
         assert!(require(Admin, Capability::Put));
         assert!(require(Admin, Capability::Config));
         assert!(!require(Admin, Capability::ReplicaHello));
+    }
+
+    #[test]
+    fn only_admin_can_read_the_audit_log() {
+        assert!(require(Admin, Capability::AuditRead));
+        assert!(!require(Writer, Capability::AuditRead));
+        assert!(!require(Reader, Capability::AuditRead));
     }
 
     #[test]

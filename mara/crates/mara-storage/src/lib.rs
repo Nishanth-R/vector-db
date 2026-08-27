@@ -15,7 +15,7 @@ mod txn_index;
 mod undo;
 pub mod wal;
 
-pub use api::{SchemaChange, Storage, StorageApi};
+pub use api::{CollectionInfo, SchemaChange, Storage, StorageApi};
 pub use change::{ChangeBatch, ChangeEvent, ChangeSubscriber};
 pub use collection::{Collection, PutInput};
 pub use document::{ChunkInput, DocEntry, PutDocumentInput};

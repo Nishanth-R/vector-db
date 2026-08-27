@@ -134,6 +134,16 @@ fn compute_checksum(record: &WalRecord) -> String {
     format!("{:08x}", crc32c(&bytes))
 }
 
+/// Whether `record.checksum` is what `compute_checksum` would produce for
+/// its own fields — the same trust check `replay_all` applies to every
+/// line read from a local WAL file, exposed for `Collection::
+/// apply_replicated_lines`, which applies the same standard to a line
+/// received from a replication leader: no more trusted than one this
+/// process wrote itself.
+pub(crate) fn verify_checksum(record: &WalRecord) -> bool {
+    compute_checksum(record) == record.checksum
+}
+
 pub fn encode_vector(v: &[f32]) -> String {
     let mut bytes = Vec::with_capacity(v.len() * 4);
     for f in v {
@@ -282,6 +292,63 @@ impl WalWriter {
         guard.offset = 0;
         let path = segment_path(dir, guard.segment_id);
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        guard.file = BufWriter::new(file);
+        Ok(())
+    }
+
+    /// Appends records whose `lsn`/`checksum` are already fixed — assigned
+    /// by a replication leader, never by this writer — the follower-side
+    /// counterpart to `append_batch`, which mints fresh LSNs. Each record
+    /// must land at exactly the position its own `lsn` specifies; a gap (a
+    /// record this writer isn't currently positioned to accept — usually a
+    /// sign of a missed or reordered batch upstream) is a hard error
+    /// rather than silently skipped or overwritten, since either would
+    /// corrupt the log's ordering guarantee. Always fsyncs before
+    /// returning — a replicated write is, by construction, this
+    /// follower's own durability boundary for that data, so it can't defer
+    /// to whatever `FsyncPolicy` this writer was opened with.
+    pub fn append_replicated_batch(&self, records: &[WalRecord]) -> io::Result<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        let mut guard = self.state.lock();
+        for record in records {
+            let seg_id = record.lsn.segment_id();
+            let want_offset = record.lsn.byte_offset();
+            if seg_id != guard.segment_id {
+                Self::switch_to_segment(&self.dir, &mut guard, seg_id)?;
+            }
+            if guard.offset != want_offset {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "replication gap: record lsn {} expects to land at offset {want_offset} in segment {seg_id}, but this WAL is currently at offset {}",
+                        record.lsn, guard.offset
+                    ),
+                ));
+            }
+            let line = serde_json::to_string(record).expect("WalRecord always serializes");
+            guard.file.write_all(line.as_bytes())?;
+            guard.file.write_all(b"\n")?;
+            guard.offset += line.len() as u32 + 1;
+        }
+        Self::flush_and_sync(&mut guard)
+    }
+
+    /// Repositions the writer onto `segment_id`'s file — opening (creating
+    /// if needed) at append position and trusting the file's actual
+    /// current length as the resume offset, the same way `WalWriter::open`
+    /// trusts it for the writer's very first segment. Used only by
+    /// `append_replicated_batch`, whose target segment is dictated by
+    /// incoming LSNs rather than this writer's own size-threshold
+    /// `rotate`.
+    fn switch_to_segment(dir: &Path, guard: &mut WriterState, segment_id: u32) -> io::Result<()> {
+        guard.file.flush()?;
+        let path = segment_path(dir, segment_id);
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
+        let offset = file.metadata()?.len() as u32;
+        guard.segment_id = segment_id;
+        guard.offset = offset;
         guard.file = BufWriter::new(file);
         Ok(())
     }
@@ -618,5 +685,99 @@ mod tests {
 
         let result = replay_all(dir.path(), None).unwrap();
         assert_eq!(result.records.len(), 1, "the tampered record must fail checksum verification and be dropped");
+    }
+
+    #[test]
+    fn replicated_batch_lands_at_the_leaders_lsn_and_replays_identically() {
+        // Simulate a "leader": records with real, distinct LSNs assigned by
+        // a normal writer.
+        let leader_dir = tempfile::tempdir().unwrap();
+        let leader = WalWriter::open(leader_dir.path(), 128 * 1024 * 1024, FsyncPolicy::Always).unwrap();
+        let mut records: Vec<WalRecord> = (0..5).map(|_| base_record(TxnId::new(), (1, 1))).collect();
+        leader.append_batch(&mut records).unwrap();
+
+        // A brand-new follower WAL, positioned at LSN zero, accepts them
+        // verbatim — no fresh LSNs minted, no gap.
+        let follower_dir = tempfile::tempdir().unwrap();
+        let follower = WalWriter::open(follower_dir.path(), 128 * 1024 * 1024, FsyncPolicy::Always).unwrap();
+        follower.append_replicated_batch(&records).unwrap();
+
+        let replayed = replay_all(follower_dir.path(), None).unwrap();
+        assert_eq!(replayed.records.len(), 5);
+        for (original, got) in records.iter().zip(&replayed.records) {
+            assert_eq!(original.lsn, got.lsn, "a replicated record must keep the leader's exact LSN");
+            assert_eq!(original.txn, got.txn);
+        }
+        assert_eq!(follower.current_lsn(), leader.current_lsn(), "follower and leader must end up at the same LSN after replicating the same records");
+    }
+
+    #[test]
+    fn replicated_batch_spanning_a_segment_rotation_lands_in_the_right_files() {
+        let leader_dir = tempfile::tempdir().unwrap();
+        // A tiny segment size forces the leader to rotate mid-batch.
+        let leader = WalWriter::open(leader_dir.path(), 200, FsyncPolicy::Always).unwrap();
+        let mut records: Vec<WalRecord> = (0..20).map(|_| base_record(TxnId::new(), (1, 1))).collect();
+        leader.append_batch(&mut records).unwrap();
+        assert!(list_segment_ids(leader_dir.path()).unwrap().len() > 1, "test setup must actually cross a segment boundary");
+
+        let follower_dir = tempfile::tempdir().unwrap();
+        // The follower's own configured segment size is irrelevant — it
+        // must land records in whichever segment the leader's LSN names,
+        // never re-derive rotation from its own threshold.
+        let follower = WalWriter::open(follower_dir.path(), 128 * 1024 * 1024, FsyncPolicy::Always).unwrap();
+        follower.append_replicated_batch(&records).unwrap();
+
+        assert_eq!(
+            list_segment_ids(follower_dir.path()).unwrap(),
+            list_segment_ids(leader_dir.path()).unwrap(),
+            "the follower must reproduce the leader's exact segment layout"
+        );
+        let replayed = replay_all(follower_dir.path(), None).unwrap();
+        assert_eq!(replayed.records.len(), 20);
+    }
+
+    #[test]
+    fn a_replicated_batch_that_skips_ahead_of_the_writers_position_is_a_hard_error() {
+        let leader_dir = tempfile::tempdir().unwrap();
+        let leader = WalWriter::open(leader_dir.path(), 128 * 1024 * 1024, FsyncPolicy::Always).unwrap();
+        let mut records: Vec<WalRecord> = (0..3).map(|_| base_record(TxnId::new(), (1, 1))).collect();
+        leader.append_batch(&mut records).unwrap();
+
+        let follower_dir = tempfile::tempdir().unwrap();
+        let follower = WalWriter::open(follower_dir.path(), 128 * 1024 * 1024, FsyncPolicy::Always).unwrap();
+        // Deliberately skip the first record — the follower is asked to
+        // apply record[1] while still positioned at offset 0.
+        let err = follower.append_replicated_batch(&records[1..]).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::InvalidData);
+    }
+
+    #[test]
+    fn a_replicated_batch_resuming_after_reconnect_continues_from_the_right_offset() {
+        let leader_dir = tempfile::tempdir().unwrap();
+        let leader = WalWriter::open(leader_dir.path(), 128 * 1024 * 1024, FsyncPolicy::Always).unwrap();
+        let mut first_half: Vec<WalRecord> = (0..3).map(|_| base_record(TxnId::new(), (1, 1))).collect();
+        leader.append_batch(&mut first_half).unwrap();
+        let mut second_half: Vec<WalRecord> = (0..3).map(|_| base_record(TxnId::new(), (1, 1))).collect();
+        leader.append_batch(&mut second_half).unwrap();
+
+        let follower_dir = tempfile::tempdir().unwrap();
+        {
+            // First "session": the follower only receives the first half
+            // before its connection drops.
+            let follower = WalWriter::open(follower_dir.path(), 128 * 1024 * 1024, FsyncPolicy::Always).unwrap();
+            follower.append_replicated_batch(&first_half).unwrap();
+        }
+        // Reconnect: a *new* `WalWriter` (mirroring a fresh process/task),
+        // reopened against the same directory, must resume exactly where
+        // the last one left off and accept the rest cleanly.
+        let follower2 = WalWriter::open(follower_dir.path(), 128 * 1024 * 1024, FsyncPolicy::Always).unwrap();
+        // `current_lsn()` is the *next-append* position, which is exactly
+        // where the leader's own writer was when it minted `second_half`'s
+        // first LSN (nothing else was written to the leader in between).
+        assert_eq!(follower2.current_lsn(), second_half[0].lsn, "reopening must resume at the position right after the last replicated record, not restart");
+        follower2.append_replicated_batch(&second_half).unwrap();
+
+        let replayed = replay_all(follower_dir.path(), None).unwrap();
+        assert_eq!(replayed.records.len(), 6);
     }
 }

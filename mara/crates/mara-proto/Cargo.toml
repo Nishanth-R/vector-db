@@ -11,6 +11,9 @@ thiserror.workspace = true
 uuid.workspace = true
 chrono.workspace = true
 roaring.workspace = true
+tokio-util.workspace = true
+bytes.workspace = true
+utoipa.workspace = true
 
 [dev-dependencies]
 proptest.workspace = true

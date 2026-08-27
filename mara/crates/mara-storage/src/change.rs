@@ -16,6 +16,11 @@ pub enum ChangeEvent {
         fields: Arc<PayloadRow>,
         extra: Option<Arc<ExtraPayload>>,
         doc_id: Option<DocId>,
+        /// The row's source text, if any — `None` for a plain row never
+        /// inserted through the document API. BM25's subscriber is the
+        /// reason this is here: it has no other way to learn what to
+        /// tokenize without a redundant per-row storage lookup.
+        text: Option<Arc<str>>,
     },
     Update {
         row_id: RowId,
@@ -24,10 +29,18 @@ pub enum ChangeEvent {
         fields: Arc<PayloadRow>,
         extra: Option<Arc<ExtraPayload>>,
         doc_id: Option<DocId>,
+        text: Option<Arc<str>>,
     },
     Delete {
         row_id: RowId,
         doc_id: Option<DocId>,
+        /// The text the deleted row was indexed under — a BM25
+        /// subscriber's `remove` must tokenize the *same* text `insert`
+        /// did to be an exact inverse (see `mara_index_bm25::Bm25Index`),
+        /// and by the time a delete reaches subscribers the row is
+        /// already gone from storage, so there's no other way to recover
+        /// it here.
+        text: Option<Arc<str>>,
     },
 }
 

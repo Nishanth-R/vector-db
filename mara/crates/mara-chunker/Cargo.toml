@@ -4,3 +4,19 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+mara-proto.workspace = true
+thiserror.workspace = true
+text-splitter = { version = "0.24", features = ["markdown", "tokenizers"] }
+# Pinned to 0.21, not the newer 0.22 the rest of the workspace might
+# otherwise reach for: text-splitter 0.24.2's own `tokenizers` feature
+# depends on `tokenizers = "0.21"` and does not re-export the crate, so a
+# `Tokenizer` built against any other major version is a distinct type
+# that its `ChunkSizer` impl (written for *its* 0.21 `Tokenizer`) doesn't
+# apply to — confirmed by probe-compiling both ways before picking this.
+tokenizers = { version = "0.21", default-features = false, features = [
+    "onig",
+    "http",
+    "rustls-tls",
+] }
+
+[dev-dependencies]

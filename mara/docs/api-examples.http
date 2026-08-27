@@ -1,0 +1,160 @@
+### mara-api examples
+### Runnable with the VS Code "REST Client" extension or IntelliJ's HTTP
+### Client. Assumes a `mara-api` process is running against a `mara.toml`
+### with `[http] listen = "127.0.0.1:7701"` (see the README's *HTTP API*
+### section). If `[auth] enabled = true`, uncomment the Authorization
+### header on every request and set @token to a real bearer token minted
+### against the daemon's token store.
+###
+### Two collections, kept deliberately separate: `vecs` (dim 3) for the
+### raw-vector examples, runnable with no embedding model configured at
+### all; `docs` (dim 384, matching `sentence-transformers/all-MiniLM-L6-v2`
+### — see the README) for the text/chunk-and-insert examples, which need
+### `[embedding] model` set in the daemon's own config.
+
+@baseUrl = http://127.0.0.1:7701
+@token = mara_pat_replace_me
+
+### Health check — no auth required, always answers.
+GET {{baseUrl}}/v1/health
+
+### The full OpenAPI 3.1 spec for this running instance.
+GET {{baseUrl}}/v1/openapi.json
+
+### --- raw-vector examples (`vecs`, dim 3, no embedding model needed) ---
+
+### Create a collection. `metric` defaults to "cosine" if omitted;
+### `schema` declares typed payload fields for filtering (omit entirely
+### for an unfiltered/untyped collection).
+POST {{baseUrl}}/v1/collections
+Content-Type: application/json
+# Authorization: Bearer {{token}}
+
+{
+  "name": "vecs",
+  "dim": 3,
+  "metric": "cosine",
+  "schema": [
+    { "name": "source", "field_type": "keyword" }
+  ]
+}
+
+### Insert or update one row by key — PUT, since this is an idempotent
+### upsert. Either `vector` or `text` is required; `text` with no
+### `vector` embeds locally on the daemon side (needs a configured model
+### whose output dimension matches the collection's).
+PUT {{baseUrl}}/v1/collections/vecs/rows/row-1
+Content-Type: application/json
+# Authorization: Bearer {{token}}
+
+{
+  "vector": [0.1, 0.2, 0.3],
+  "fields": {
+    "source": { "keyword": "manual-insert" }
+  }
+}
+
+### Fetch one row by key.
+GET {{baseUrl}}/v1/collections/vecs/rows/row-1
+# Authorization: Bearer {{token}}
+
+### Insert several rows in one request.
+POST {{baseUrl}}/v1/collections/vecs/rows/batch
+Content-Type: application/json
+# Authorization: Bearer {{token}}
+
+{
+  "items": [
+    { "key": "row-2", "vector": [0.4, 0.5, 0.6], "fields": {}, "extra": null },
+    { "key": "row-3", "vector": [0.7, 0.8, 0.9], "fields": {}, "extra": null }
+  ]
+}
+
+### Delete a row by key — 204 No Content on success.
+DELETE {{baseUrl}}/v1/collections/vecs/rows/row-3
+# Authorization: Bearer {{token}}
+
+### Vector-only search with an explicit query vector and a filter — no
+### local embedding needed since `query_vector` is given directly.
+POST {{baseUrl}}/v1/collections/vecs/search
+Content-Type: application/json
+# Authorization: Bearer {{token}}
+
+{
+  "query_vector": [0.1, 0.2, 0.3],
+  "mode": "vector_only",
+  "k": 5,
+  "filter": {
+    "eq": { "field": "source", "value": { "str": "manual-insert" } }
+  }
+}
+
+### Build or rebuild a vector/BM25 index for the collection from current
+### storage state. `index_kind`: "flat" | "ivf_pq" | "lsh" | "bm25".
+POST {{baseUrl}}/v1/collections/vecs/reindex
+Content-Type: application/json
+# Authorization: Bearer {{token}}
+
+{
+  "index_kind": "ivf_pq"
+}
+
+### --- text/embedding examples (`docs`, dim 384, needs [embedding] model) ---
+
+### A collection sized for `sentence-transformers/all-MiniLM-L6-v2`'s
+### 384-dimensional output — see the README's *Embedding model* section
+### for the daemon-side config this requires.
+POST {{baseUrl}}/v1/collections
+Content-Type: application/json
+# Authorization: Bearer {{token}}
+
+{
+  "name": "docs",
+  "dim": 384
+}
+
+### Chunk-and-insert: splits `text` per `chunk_spec` (server-side
+### markdown/sentence/token/character chunking), embeds every chunk with
+### the daemon's configured local model, and commits the whole document
+### as one transaction. Omit `chunk_spec` for the default (markdown-
+### aware, 512 tokens, 64 overlap).
+POST {{baseUrl}}/v1/collections/docs/documents
+Content-Type: application/json
+# Authorization: Bearer {{token}}
+
+{
+  "doc_key": "readme",
+  "text": "# mara\n\nA ground-up Rust vector database.\n\n## Replication\n\nLeader-follower, async.",
+  "source": "README.md"
+}
+
+### Hybrid search (BM25 + vector, fused via reciprocal rank fusion) — the
+### default `mode`, so it can be omitted entirely. `query_text` with no
+### `query_vector` embeds locally for the vector arm.
+POST {{baseUrl}}/v1/collections/docs/search
+Content-Type: application/json
+# Authorization: Bearer {{token}}
+
+{
+  "query_text": "how does replication work",
+  "k": 5
+}
+
+### BM25-only search — `query_text` is required, `query_vector` is
+### ignored, and no embedding model is needed for this arm alone.
+POST {{baseUrl}}/v1/collections/docs/search
+Content-Type: application/json
+# Authorization: Bearer {{token}}
+
+{
+  "query_text": "replication",
+  "mode": "bm25_only",
+  "k": 5
+}
+
+### --- admin ---
+
+### Recent audit log entries, newest first — Admin-only regardless of
+### `[auth] enabled`.
+GET {{baseUrl}}/v1/audit?limit=20
+# Authorization: Bearer {{token}}

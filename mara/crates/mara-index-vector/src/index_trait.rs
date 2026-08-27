@@ -1,9 +1,9 @@
 use crate::error::IndexResult;
-use crate::hit::SearchHit;
+use crate::hit::SearchResult;
 use crate::params::SearchParams;
 use mara_storage::{FilterMask, StorageApi};
 
-/// Implemented uniformly by `Flat`, and later `IvfPq` and `Lsh`. Takes
+/// Implemented uniformly by `Flat`, `Ivf`/`IvfPq`, and later `Lsh`. Takes
 /// `StorageApi` directly (reconciled from two independently-drafted
 /// interfaces into one, per the master plan) rather than a parallel
 /// `VectorSource` trait — storage is the single source of truth, and the
@@ -17,5 +17,5 @@ pub trait VectorIndex: Send + Sync {
         k: usize,
         filter: Option<&FilterMask>,
         params: &SearchParams,
-    ) -> IndexResult<Vec<SearchHit>>;
+    ) -> IndexResult<SearchResult>;
 }

@@ -4,6 +4,10 @@ pub enum IndexError {
     DimMismatch { expected: usize, got: usize },
     #[error(transparent)]
     Storage(#[from] mara_storage::StorageError),
+    #[error(transparent)]
+    Pq(#[from] crate::pq::PqError),
+    #[error(transparent)]
+    Lsh(#[from] crate::lsh::LshError),
 }
 
 pub type IndexResult<T> = Result<T, IndexError>;

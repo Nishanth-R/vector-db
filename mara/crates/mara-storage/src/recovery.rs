@@ -36,13 +36,20 @@ pub(crate) fn change_events_from_records(records: &[WalRecord]) -> Vec<ChangeEve
                     let fields = Arc::new(p.fields.clone().unwrap_or_default());
                     let extra = p.extra.clone().map(Arc::new);
                     let key: Arc<str> = Arc::from(r.key.clone()?.as_str());
+                    let text: Option<Arc<str>> = p.text.as_deref().map(Arc::from);
                     Some(if r.op == WalOp::Insert {
-                        ChangeEvent::Insert { row_id, key, vector, fields, extra, doc_id: r.doc_id }
+                        ChangeEvent::Insert { row_id, key, vector, fields, extra, doc_id: r.doc_id, text }
                     } else {
-                        ChangeEvent::Update { row_id, key, vector, fields, extra, doc_id: r.doc_id }
+                        ChangeEvent::Update { row_id, key, vector, fields, extra, doc_id: r.doc_id, text }
                     })
                 }
-                WalOp::Delete => Some(ChangeEvent::Delete { row_id, doc_id: r.doc_id }),
+                // The deleted row's text lives on `undo` (the compensating
+                // payload), not `payload` (`None` on a delete record) —
+                // see `Collection::delete`.
+                WalOp::Delete => {
+                    let text: Option<Arc<str>> = r.undo.as_ref().and_then(|u| u.text.as_deref()).map(Arc::from);
+                    Some(ChangeEvent::Delete { row_id, doc_id: r.doc_id, text })
+                }
                 _ => None,
             }
         })

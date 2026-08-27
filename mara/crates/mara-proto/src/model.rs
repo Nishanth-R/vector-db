@@ -9,7 +9,10 @@ use serde::{Deserialize, Serialize};
 /// nonsense.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct ModelFingerprint {
+    /// Identifier of the embedding model.
     pub model_id: String,
+    /// Optional model revision or version string.
     pub revision: Option<String>,
+    /// Output vector dimensionality.
     pub dim: usize,
 }

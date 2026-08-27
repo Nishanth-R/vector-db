@@ -4,9 +4,22 @@
 //! internal representation from, so "the exact rerank" and "the only
 //! computation" are the same thing here.
 
+use mara_proto::DistanceMetric;
 use wide::f32x8;
 
 const LANES: usize = 8;
+
+/// Every exact-scoring `VectorIndex` (`Flat`, `Ivf`, `IvfPq`'s rerank
+/// stage) converts a raw distance/similarity into the same higher-is-
+/// better convention this one way — shared so "what score means" can
+/// never quietly drift between index implementations.
+pub fn score(metric: DistanceMetric, query: &[f32], vector: &[f32]) -> f32 {
+    match metric {
+        DistanceMetric::Cosine => cosine(query, vector),
+        DistanceMetric::L2 => -l2_sq(query, vector),
+        DistanceMetric::DotProduct => dot(query, vector),
+    }
+}
 
 /// Dot product, SIMD over 8-lane chunks with a scalar tail.
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {

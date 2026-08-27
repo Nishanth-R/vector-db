@@ -151,17 +151,73 @@ pub fn prune_older_than(dir: &Path, retention_days: i64) -> io::Result<()> {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if let Some(rest) = name.strip_prefix("audit-") {
-            if let Some(date_str) = rest.get(..10) {
-                if let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d") {
-                    if date < cutoff {
+        if let Some(rest) = name.strip_prefix("audit-")
+            && let Some(date_str) = rest.get(..10)
+                && let Ok(date) = NaiveDate::parse_from_str(date_str, "%Y-%m-%d")
+                    && date < cutoff {
                         let _ = fs::remove_file(entry.path());
                     }
+    }
+    Ok(())
+}
+
+/// `(date, rotation_index)` parsed from an `audit-{date}.jsonl` or
+/// `audit-{date}.{rotation_index}.jsonl` file name — sortable so
+/// `read_recent` can walk segments in true chronological order rather than
+/// lexical file-name order (`audit-2026-08-25.9.jsonl` sorts before
+/// `audit-2026-08-25.10.jsonl` numerically, not as strings).
+fn parse_segment_name(name: &str) -> Option<(NaiveDate, u32)> {
+    let rest = name.strip_prefix("audit-")?.strip_suffix(".jsonl")?;
+    let date_str = rest.get(..10)?;
+    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").ok()?;
+    let rotation_index = match rest.get(10..) {
+        Some("") => 0,
+        Some(suffix) => suffix.strip_prefix('.')?.parse().ok()?,
+        None => 0,
+    };
+    Some((date, rotation_index))
+}
+
+/// Reads back up to `limit` of the most recent audit records under `dir`,
+/// newest first — what `mara-api`'s `/v1/audit` (Admin-only, gated on
+/// `Capability::AuditRead`) reads directly from disk rather than through
+/// the `AuditSink` trait, which is write-only by design (the request path
+/// never blocks on a query). Walks segments newest-to-oldest and, within
+/// each, lines last-to-first, stopping as soon as `limit` is reached — so
+/// a huge historical log never needs a full scan just to answer "show me
+/// the last 50". A line that fails to parse (e.g. a torn tail from a
+/// write in progress) is skipped rather than failing the whole read.
+pub fn read_recent(dir: &Path, limit: usize) -> io::Result<Vec<AuditRecord>> {
+    if limit == 0 || !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut segments: Vec<(NaiveDate, u32, PathBuf)> = fs::read_dir(dir)?
+        .filter_map(|entry| entry.ok())
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let (date, rotation_index) = parse_segment_name(&name.to_string_lossy())?;
+            Some((date, rotation_index, entry.path()))
+        })
+        .collect();
+    segments.sort_by_key(|(date, rotation_index, _)| (*date, *rotation_index));
+
+    let mut out = Vec::with_capacity(limit.min(1024));
+    for (_, _, path) in segments.into_iter().rev() {
+        let contents = fs::read_to_string(&path)?;
+        for line in contents.lines().rev() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(record) = serde_json::from_str::<AuditRecord>(line) {
+                out.push(record);
+                if out.len() >= limit {
+                    return Ok(out);
                 }
             }
         }
     }
-    Ok(())
+    Ok(out)
 }
 
 struct WriterState {
@@ -465,5 +521,78 @@ mod tests {
         let rotated = dir.path().join(format!("audit-{today}.1.jsonl"));
         assert!(base.exists());
         assert!(rotated.exists(), "expected a rotated file once the size threshold was crossed");
+    }
+
+    #[test]
+    fn read_recent_returns_newest_first_across_rotated_segments() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = JsonlAuditSink::open(
+            dir.path(),
+            AuditConfig {
+                mode: AuditMode::Strict,
+                fsync: AuditFsync::Always,
+                rotate_size_mb: 0, // forces a fresh segment per record, past the first
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let ctx = test_ctx();
+        for i in 0..5 {
+            sink.record(AuditRecord::new(&ctx, "search", AuditOutcome::Ok, 1).with_extra("seq", i))
+                .unwrap();
+        }
+        sink.close();
+
+        let recent = read_recent(dir.path(), 100).unwrap();
+        let seqs: Vec<i64> = recent.iter().map(|r| r.extra.get("seq").unwrap().as_i64().unwrap()).collect();
+        assert_eq!(seqs, vec![4, 3, 2, 1, 0], "read_recent must walk both segment order and within-segment order newest-first");
+    }
+
+    #[test]
+    fn read_recent_stops_as_soon_as_the_limit_is_reached() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = JsonlAuditSink::open(dir.path(), AuditConfig { mode: AuditMode::Strict, fsync: AuditFsync::Always, ..Default::default() }).unwrap();
+        let ctx = test_ctx();
+        for i in 0..10 {
+            sink.record(AuditRecord::new(&ctx, "search", AuditOutcome::Ok, 1).with_extra("seq", i))
+                .unwrap();
+        }
+        sink.close();
+
+        let recent = read_recent(dir.path(), 3).unwrap();
+        let seqs: Vec<i64> = recent.iter().map(|r| r.extra.get("seq").unwrap().as_i64().unwrap()).collect();
+        assert_eq!(seqs, vec![9, 8, 7]);
+    }
+
+    #[test]
+    fn read_recent_skips_a_malformed_line_rather_than_failing_the_whole_read() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir_all(dir.path()).unwrap();
+        let ctx = test_ctx();
+        let good1 = serde_json::to_string(&AuditRecord::new(&ctx, "search", AuditOutcome::Ok, 1)).unwrap();
+        let good2 = serde_json::to_string(&AuditRecord::new(&ctx, "put", AuditOutcome::Ok, 2)).unwrap();
+        let today = Utc::now().date_naive();
+        fs::write(dir.path().join(format!("audit-{today}.jsonl")), format!("{good1}\n{{not valid json\n{good2}\n")).unwrap();
+
+        let recent = read_recent(dir.path(), 10).unwrap();
+        assert_eq!(recent.len(), 2, "the torn/malformed middle line must be skipped, not fail the read");
+        assert_eq!(recent[0].action, "put");
+        assert_eq!(recent[1].action, "search");
+    }
+
+    #[test]
+    fn read_recent_on_a_missing_directory_is_an_empty_list_not_an_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("never-created");
+        assert_eq!(read_recent(&missing, 10).unwrap(), Vec::new());
+    }
+
+    #[test]
+    fn segment_name_parsing_orders_rotation_index_numerically_not_lexically() {
+        assert_eq!(parse_segment_name("audit-2026-08-25.jsonl"), Some((NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(), 0)));
+        assert_eq!(parse_segment_name("audit-2026-08-25.9.jsonl"), Some((NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(), 9)));
+        assert_eq!(parse_segment_name("audit-2026-08-25.10.jsonl"), Some((NaiveDate::from_ymd_opt(2026, 8, 25).unwrap(), 10)));
+        assert!(parse_segment_name("not-an-audit-file.jsonl").is_none());
+        assert!(parse_segment_name("audit-2026-08-25.notanumber.jsonl").is_none());
     }
 }

@@ -11,9 +11,13 @@ use uuid::Uuid;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Role {
+    /// Full administrative access, including principal and cluster management.
     Admin,
+    /// Read and write access to collection data.
     Writer,
+    /// Read-only access to collection data.
     Reader,
+    /// A replica peer, permitted to stream replication traffic.
     Replica,
 }
 
@@ -26,8 +30,11 @@ pub enum Role {
 /// to this view.
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub struct Principal {
+    /// Unique identifier of the principal.
     pub id: PrincipalId,
+    /// Human-readable name of the principal.
     pub name: String,
+    /// The principal's authorization role.
     pub role: Role,
 }
 
@@ -37,9 +44,18 @@ pub struct Principal {
 /// OS user directly).
 #[derive(Clone, PartialEq, Eq, Debug, Serialize, Deserialize)]
 pub enum Source {
-    Uds { os_uid: u32, os_user: String },
+    /// A Unix domain socket connection, with the peer's OS credentials.
+    Uds {
+        /// The connecting peer's OS user id.
+        os_uid: u32,
+        /// The connecting peer's OS username.
+        os_user: String,
+    },
+    /// A plain TCP connection, identified only by its socket address.
     Tcp(SocketAddr),
+    /// An HTTP connection, identified only by its socket address.
     Http(SocketAddr),
+    /// An in-process call with no transport, attributed to the local OS user.
     Embedded,
 }
 
@@ -55,14 +71,20 @@ pub enum Source {
 /// their own narrower attribution fields derived from it).
 #[derive(Clone, Debug)]
 pub struct RequestCtx {
+    /// Unique identifier for this request.
     pub request_id: Uuid,
+    /// The session this request belongs to.
     pub session: SessionId,
+    /// The identity making the request.
     pub principal: Principal,
+    /// Where the request came from.
     pub source: Source,
+    /// When the server received the request.
     pub received_at: Instant,
 }
 
 impl RequestCtx {
+    /// Builds a new context, generating a fresh request id and timestamping it now.
     pub fn new(session: SessionId, principal: Principal, source: Source) -> Self {
         RequestCtx {
             request_id: Uuid::new_v4(),

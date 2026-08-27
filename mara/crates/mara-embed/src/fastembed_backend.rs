@@ -47,15 +47,14 @@ impl EmbeddingBackend for FastEmbedBackend {
         }
         let mut guard = self.inner.lock();
         let out = guard.embed(texts, None).map_err(|e| EmbedError::Backend(e.to_string()))?;
-        if let Some(v) = out.first() {
-            if v.len() != self.fingerprint.dim {
+        if let Some(v) = out.first()
+            && v.len() != self.fingerprint.dim {
                 return Err(EmbedError::DimMismatch {
                     model_id: self.fingerprint.model_id.clone(),
                     expected: self.fingerprint.dim,
                     got: v.len(),
                 });
             }
-        }
         Ok(out)
     }
 }
@@ -64,11 +63,7 @@ impl EmbeddingBackend for FastEmbedBackend {
 mod tests {
     use super::*;
 
-    /// Actually loads a model — downloads it on first run. Not run by
-    /// default (no network / no multi-hundred-MB download in ordinary
-    /// `cargo test`); run explicitly with
-    /// `cargo test -p mara-embed -- --ignored` when you want to exercise
-    /// the real backend end to end.
+
     #[test]
     #[ignore = "downloads a real ONNX model from the network on first run"]
     fn loads_and_embeds_a_real_model() {

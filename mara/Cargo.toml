@@ -61,6 +61,38 @@ toml = "0.8"
 crossbeam-channel = "0.5"
 wide = "1"
 rayon = "1"
+tokio-util = { version = "0.7", features = ["codec"] }
+bytes = "1"
+async-trait = "0.1"
+futures-util = { version = "0.3", features = ["sink"] }
+clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
+rustyline = "14"
+shell-words = "1"
+axum = "0.8"
+tracing-appender = "0.2"
+deadpool = { version = "0.13", features = ["managed"] }
+fd-lock = "4"
+indicatif = "0.18"
+dirs = "6"
+# OPQ's orthogonal Procrustes rotation (training-time only): one SVD of a
+# dim x dim matrix per outer iteration.
+nalgebra = "0.35"
+# BM25 tokenization: UAX #29 word segmentation, a compile-time-embedded
+# stopword set, and optional (off by default) Snowball stemming.
+unicode-segmentation = "1"
+phf = { version = "0.11", features = ["macros"] }
+rust-stemmers = "1"
+# LiveIndex's atomic baked-index generation swap.
+arc-swap = "1"
+# mara-api's OpenAPI spec generation, derived straight off the same wire
+# types `mara-proto` already carries rather than a second, parallel DTO
+# layer.
+utoipa = "5"
+# Dev-only recall/latency benchmarking (master plan's *Defaults and
+# crates*) — used to check OPQ actually earns its keep on the configured
+# embedding model rather than assuming it does.
+criterion = "0.5"
 
 [profile.release]
 opt-level = 3

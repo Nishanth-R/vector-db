@@ -8,14 +8,18 @@ use crate::request::Request;
 use crate::response::Response;
 use uuid::Uuid;
 
+/// Wire protocol version written into every frame header.
 pub const PROTOCOL_VERSION: u8 = 1;
 
 /// `HEADER_LEN = version(1) + kind(1) + request_id(16) + body_len(4)`.
 pub const HEADER_LEN: usize = 1 + 1 + 16 + 4;
 
+/// Discriminates whether a frame carries a `Request` or a `Response`.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum FrameKind {
+    /// The frame body is an encoded `Request`.
     Request = 0,
+    /// The frame body is an encoded `Response`.
     Response = 1,
 }
 
@@ -29,11 +33,16 @@ impl FrameKind {
     }
 }
 
+/// A single decoded frame, with its header fields and raw (still-encoded) body.
 #[derive(Clone, Debug)]
 pub struct DecodedFrame {
+    /// The protocol version the frame was written with.
     pub version: u8,
+    /// Whether this frame is a request or a response.
     pub kind: FrameKind,
+    /// Correlation id linking a response back to its request.
     pub request_id: Uuid,
+    /// The raw, not-yet-deserialized frame payload.
     pub body: Vec<u8>,
 }
 
@@ -51,11 +60,13 @@ fn encode_frame(kind: FrameKind, request_id: Uuid, body: &[u8]) -> ProtoResult<V
     Ok(out)
 }
 
+/// Encodes a `Request` into a framed, length-prefixed byte buffer.
 pub fn encode_request(request_id: Uuid, req: &Request) -> ProtoResult<Vec<u8>> {
     let body = bincode::serde::encode_to_vec(req, bincode_config())?;
     encode_frame(FrameKind::Request, request_id, &body)
 }
 
+/// Encodes a `Response` into a framed, length-prefixed byte buffer.
 pub fn encode_response(request_id: Uuid, resp: &Response) -> ProtoResult<Vec<u8>> {
     let body = bincode::serde::encode_to_vec(resp, bincode_config())?;
     encode_frame(FrameKind::Response, request_id, &body)
@@ -93,11 +104,13 @@ pub fn try_decode_frame(buf: &[u8]) -> ProtoResult<Option<(DecodedFrame, usize)>
     )))
 }
 
+/// Deserializes a `Request` from a frame's raw body bytes.
 pub fn decode_request_body(body: &[u8]) -> ProtoResult<Request> {
     let (req, _) = bincode::serde::decode_from_slice(body, bincode_config())?;
     Ok(req)
 }
 
+/// Deserializes a `Response` from a frame's raw body bytes.
 pub fn decode_response_body(body: &[u8]) -> ProtoResult<Response> {
     let (resp, _) = bincode::serde::decode_from_slice(body, bincode_config())?;
     Ok(resp)

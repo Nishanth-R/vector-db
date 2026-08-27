@@ -4,3 +4,14 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+mara-proto.workspace = true
+mara-storage.workspace = true
+roaring.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+unicode-segmentation.workspace = true
+phf.workspace = true
+rust-stemmers.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true

@@ -11,5 +11,15 @@ tracing.workspace = true
 roaring.workspace = true
 wide.workspace = true
 rayon.workspace = true
+rand.workspace = true
+rand_chacha.workspace = true
+nalgebra.workspace = true
+arc-swap.workspace = true
+parking_lot.workspace = true
 
 [dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "recall"
+harness = false

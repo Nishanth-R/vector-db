@@ -3,4 +3,26 @@ name = "mara-api"
 version.workspace = true
 edition.workspace = true
 
+[[bin]]
+name = "mara-api"
+path = "src/main.rs"
+
 [dependencies]
+mara-proto.workspace = true
+mara-auth.workspace = true
+mara-daemon.workspace = true
+axum.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
+utoipa.workspace = true
+clap.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

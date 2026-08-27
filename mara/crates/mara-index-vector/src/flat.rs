@@ -9,15 +9,16 @@
 //! logic to get wrong.
 
 use crate::error::{IndexError, IndexResult};
-use crate::hit::SearchHit;
+use crate::grouping::apply_doc_grouping;
+use crate::hit::{SearchHit, SearchResult};
 use crate::index_trait::VectorIndex;
 use crate::math;
 use crate::params::SearchParams;
-use mara_proto::{DistanceMetric, DocId, Row};
+use crate::scoring::finish_exact;
+use mara_proto::{DistanceMetric, Row, RowId};
 use mara_storage::{FilterMask, StorageApi, StorageResult};
 use rayon::prelude::*;
 use std::cmp::Ordering;
-use std::collections::HashMap;
 
 const SCAN_PAGE_SIZE: usize = 10_000;
 
@@ -29,17 +30,6 @@ pub struct FlatIndex {
 impl FlatIndex {
     pub fn new(dim: usize, metric: DistanceMetric) -> Self {
         FlatIndex { dim, metric }
-    }
-
-    /// Always higher-is-better, in `self.metric`'s convention — for `L2`
-    /// that means the caller sees `-squared_distance`, never a raw
-    /// distance a naive caller might mistake for "lower is better".
-    fn score(&self, query: &[f32], vector: &[f32]) -> f32 {
-        match self.metric {
-            DistanceMetric::Cosine => math::cosine(query, vector),
-            DistanceMetric::L2 => -math::l2_sq(query, vector),
-            DistanceMetric::DotProduct => math::dot(query, vector),
-        }
     }
 }
 
@@ -58,28 +48,6 @@ fn scan_all(storage: &dyn StorageApi, coll: &str) -> StorageResult<Vec<Row>> {
     Ok(out)
 }
 
-/// Caps how many hits from the same document survive, in score order —
-/// applied once here so every `VectorIndex` implementation can share it
-/// rather than reimplementing the same grouping logic.
-fn apply_doc_grouping(mut ranked: Vec<(f32, &Row)>, k: usize, max_chunks_per_doc: Option<u32>) -> Vec<(f32, &Row)> {
-    if let Some(max) = max_chunks_per_doc {
-        let mut per_doc: HashMap<DocId, u32> = HashMap::new();
-        ranked.retain(|(_, row)| match row.doc_id {
-            Some(doc_id) => {
-                let count = per_doc.entry(doc_id).or_insert(0);
-                let keep = *count < max;
-                if keep {
-                    *count += 1;
-                }
-                keep
-            }
-            None => true,
-        });
-    }
-    ranked.truncate(k);
-    ranked
-}
-
 impl VectorIndex for FlatIndex {
     fn search(
         &self,
@@ -89,7 +57,7 @@ impl VectorIndex for FlatIndex {
         k: usize,
         filter: Option<&FilterMask>,
         params: &SearchParams,
-    ) -> IndexResult<Vec<SearchHit>> {
+    ) -> IndexResult<SearchResult> {
         if query.len() != self.dim {
             return Err(IndexError::DimMismatch {
                 expected: self.dim,
@@ -97,7 +65,20 @@ impl VectorIndex for FlatIndex {
             });
         }
         if k == 0 {
-            return Ok(Vec::new());
+            return Ok(SearchResult { hits: Vec::new(), truncated_by_filter: false });
+        }
+
+        // Master plan *Filtered search*, regime 1: a mask this small
+        // fetches faster by id than by scanning the whole collection —
+        // `FlatIndex` is already exhaustive over whatever candidate set
+        // it considers, so this is a pure performance win, never a
+        // recall one (`truncated_by_filter` never applies here).
+        if let Some(f) = filter
+            && (f.estimated_cardinality as usize) <= params.filter_exact_threshold
+        {
+            let ids: Vec<RowId> = f.allowed.iter().map(RowId::from_bitmap_index).collect();
+            let hits = finish_exact(storage, coll, self.metric, query, k, &ids, params.max_chunks_per_doc)?;
+            return Ok(SearchResult { hits, truncated_by_filter: false });
         }
 
         let rows = scan_all(storage, coll)?;
@@ -105,13 +86,13 @@ impl VectorIndex for FlatIndex {
         let mut scored: Vec<(f32, &Row)> = rows
             .par_iter()
             .filter(|row| filter.is_none_or(|f| f.contains(row.id)))
-            .filter_map(|row| row.vector.as_deref().map(|v| (self.score(query, v), row)))
+            .filter_map(|row| row.vector.as_deref().map(|v| (math::score(self.metric, query, v), row)))
             .collect();
 
         scored.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(Ordering::Equal));
 
         let grouped = apply_doc_grouping(scored, k, params.max_chunks_per_doc);
-        Ok(grouped
+        let hits = grouped
             .into_iter()
             .map(|(score, row)| SearchHit {
                 id: row.id,
@@ -121,7 +102,8 @@ impl VectorIndex for FlatIndex {
                 metric: self.metric,
                 exact: true,
             })
-            .collect())
+            .collect();
+        Ok(SearchResult { hits, truncated_by_filter: false })
     }
 }
 
@@ -158,8 +140,8 @@ mod tests {
         let s = storage_with(&[("a", [1.0, 0.0, 0.0]), ("b", [0.0, 1.0, 0.0]), ("c", [0.9, 0.1, 0.0])]);
         let idx = FlatIndex::new(3, DistanceMetric::Cosine);
         let hits = idx
-            .search(&s, "docs", &[1.0, 0.0, 0.0], 3, None, &SearchParams { max_chunks_per_doc: None })
-            .unwrap();
+            .search(&s, "docs", &[1.0, 0.0, 0.0], 3, None, &SearchParams { max_chunks_per_doc: None, ..SearchParams::default() })
+            .unwrap().hits;
         assert_eq!(hits.len(), 3);
         assert_eq!(s.get_by_key("docs", "a").unwrap().unwrap().id, hits[0].id, "exact match must rank first");
         assert!(hits[0].exact);
@@ -171,8 +153,8 @@ mod tests {
         let s = storage_with(&[("far", [10.0, 10.0, 10.0]), ("near", [1.1, 0.0, 0.0]), ("mid", [3.0, 0.0, 0.0])]);
         let idx = FlatIndex::new(3, DistanceMetric::L2);
         let hits = idx
-            .search(&s, "docs", &[1.0, 0.0, 0.0], 1, None, &SearchParams { max_chunks_per_doc: None })
-            .unwrap();
+            .search(&s, "docs", &[1.0, 0.0, 0.0], 1, None, &SearchParams { max_chunks_per_doc: None, ..SearchParams::default() })
+            .unwrap().hits;
         assert_eq!(hits.len(), 1);
         assert_eq!(s.get_by_key("docs", "near").unwrap().unwrap().id, hits[0].id);
     }
@@ -182,8 +164,8 @@ mod tests {
         let s = storage_with(&[("small", [1.0, 0.0, 0.0]), ("large", [5.0, 0.0, 0.0])]);
         let idx = FlatIndex::new(3, DistanceMetric::DotProduct);
         let hits = idx
-            .search(&s, "docs", &[1.0, 0.0, 0.0], 2, None, &SearchParams { max_chunks_per_doc: None })
-            .unwrap();
+            .search(&s, "docs", &[1.0, 0.0, 0.0], 2, None, &SearchParams { max_chunks_per_doc: None, ..SearchParams::default() })
+            .unwrap().hits;
         assert_eq!(s.get_by_key("docs", "large").unwrap().unwrap().id, hits[0].id);
     }
 
@@ -202,8 +184,8 @@ mod tests {
         let s = storage_with(&[("a", [1.0, 0.0, 0.0]), ("b", [0.0, 1.0, 0.0])]);
         let idx = FlatIndex::new(3, DistanceMetric::Cosine);
         let hits = idx
-            .search(&s, "docs", &[1.0, 0.0, 0.0], 100, None, &SearchParams { max_chunks_per_doc: None })
-            .unwrap();
+            .search(&s, "docs", &[1.0, 0.0, 0.0], 100, None, &SearchParams { max_chunks_per_doc: None, ..SearchParams::default() })
+            .unwrap().hits;
         assert_eq!(hits.len(), 2);
     }
 
@@ -213,7 +195,7 @@ mod tests {
         s.create_collection(&ctx(), "docs", 3, DistanceMetric::Cosine, PayloadSchema::empty())
             .unwrap();
         let idx = FlatIndex::new(3, DistanceMetric::Cosine);
-        let hits = idx.search(&s, "docs", &[1.0, 0.0, 0.0], 5, None, &SearchParams::default()).unwrap();
+        let hits = idx.search(&s, "docs", &[1.0, 0.0, 0.0], 5, None, &SearchParams::default()).unwrap().hits;
         assert!(hits.is_empty());
     }
 
@@ -230,8 +212,8 @@ mod tests {
 
         let idx = FlatIndex::new(3, DistanceMetric::Cosine);
         let hits = idx
-            .search(&s, "docs", &[1.0, 0.0, 0.0], 5, Some(&mask), &SearchParams { max_chunks_per_doc: None })
-            .unwrap();
+            .search(&s, "docs", &[1.0, 0.0, 0.0], 5, Some(&mask), &SearchParams { max_chunks_per_doc: None, ..SearchParams::default() })
+            .unwrap().hits;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, id_a);
     }
@@ -253,8 +235,8 @@ mod tests {
             .unwrap();
         let idx = FlatIndex::new(3, DistanceMetric::Cosine);
         let hits = idx
-            .search(&s, "docs", &[1.0, 0.0, 0.0], 5, Some(&mask), &SearchParams { max_chunks_per_doc: None })
-            .unwrap();
+            .search(&s, "docs", &[1.0, 0.0, 0.0], 5, Some(&mask), &SearchParams { max_chunks_per_doc: None, ..SearchParams::default() })
+            .unwrap().hits;
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].id, s.get_by_key("docs", "a").unwrap().unwrap().id);
     }
@@ -291,8 +273,8 @@ mod tests {
 
         let idx = FlatIndex::new(3, DistanceMetric::Cosine);
         let hits = idx
-            .search(&s, "docs", &[1.0, 0.0, 0.0], 10, None, &SearchParams { max_chunks_per_doc: Some(2) })
-            .unwrap();
+            .search(&s, "docs", &[1.0, 0.0, 0.0], 10, None, &SearchParams { max_chunks_per_doc: Some(2), ..SearchParams::default() })
+            .unwrap().hits;
         assert_eq!(hits.len(), 2, "only 2 of the document's 5 chunks may appear");
     }
 
@@ -328,8 +310,8 @@ mod tests {
 
         let idx = FlatIndex::new(3, DistanceMetric::Cosine);
         let hits = idx
-            .search(&s, "docs", &[1.0, 0.0, 0.0], 10, None, &SearchParams { max_chunks_per_doc: None })
-            .unwrap();
+            .search(&s, "docs", &[1.0, 0.0, 0.0], 10, None, &SearchParams { max_chunks_per_doc: None, ..SearchParams::default() })
+            .unwrap().hits;
         assert_eq!(hits.len(), 5);
     }
 }

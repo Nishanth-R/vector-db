@@ -8,3 +8,8 @@ name = "marad"
 path = "src/main.rs"
 
 [dependencies]
+mara-daemon.workspace = true
+clap.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true

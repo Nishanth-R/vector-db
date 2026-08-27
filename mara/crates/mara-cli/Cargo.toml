@@ -8,3 +8,33 @@ name = "mara"
 path = "src/main.rs"
 
 [dependencies]
+mara-client.workspace = true
+mara-proto.workspace = true
+mara-daemon = { workspace = true, optional = true }
+mara-auth = { workspace = true, optional = true }
+mara-storage = { workspace = true, optional = true }
+mara-embed = { workspace = true, optional = true }
+tracing-subscriber = { workspace = true, optional = true }
+clap.workspace = true
+clap_complete.workspace = true
+rustyline.workspace = true
+shell-words.workspace = true
+tokio.workspace = true
+serde_json.workspace = true
+indicatif.workspace = true
+dirs.workspace = true
+fd-lock.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[features]
+default = ["embedded"]
+# Pulls in mara-daemon (and, transitively, mara-embed/fastembed/ONNX) for
+# `mara serve` and `--embedded` — see the master plan's "Binary size note".
+# `cargo build -p mara-cli --no-default-features` yields a slim
+# socket-only client with neither.
+embedded = ["dep:mara-daemon", "dep:mara-auth", "dep:mara-storage", "dep:mara-embed", "dep:tracing-subscriber"]
+
+[dev-dependencies]
+tempfile.workspace = true

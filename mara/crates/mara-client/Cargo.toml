@@ -4,3 +4,14 @@ version.workspace = true
 edition.workspace = true
 
 [dependencies]
+mara-proto.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+futures-util.workspace = true
+deadpool.workspace = true
+uuid.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+mara-daemon.workspace = true
